@@ -1,14 +1,27 @@
-import { useState } from "react";
+import { Suspense, useState } from "react";
 import type * as React from "react";
+import { MAX_PLAYERS } from "../../shared/protocol";
+import { modeFor } from "./modes/registry";
 import { createRoom, joinRoom } from "./net";
+import { PerfOverlay } from "./PerfOverlay";
 import { setState, useStore } from "./store";
-import { Table } from "./Table";
 import { Toasts } from "./ui";
 
 export function App() {
   const st = useStore();
-  if (st.session && st.room) return <Table />;
-  return <Lobby />;
+  const Mode = st.session && st.room ? modeFor(st.room.mode).component : null;
+  return (
+    <>
+      {Mode ? (
+        <Suspense fallback={<div className="mode-loading">테이블 불러오는 중…</div>}>
+          <Mode />
+        </Suspense>
+      ) : (
+        <Lobby />
+      )}
+      <PerfOverlay />
+    </>
+  );
 }
 
 function Lobby() {
@@ -105,7 +118,7 @@ function Lobby() {
             </button>
           </div>
         </div>
-        <p className="muted small">최대 6명 · PC, 안드로이드, 아이폰 브라우저에서 함께 할 수 있어요 · 게임방은 서버가 재시작되면 사라져요</p>
+        <p className="muted small">최대 {MAX_PLAYERS}명 · PC, 안드로이드, 아이폰 브라우저에서 함께 할 수 있어요 · 게임방은 서버가 재시작되면 사라져요</p>
       </div>
       <Toasts />
     </div>

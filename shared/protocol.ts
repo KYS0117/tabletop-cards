@@ -9,7 +9,8 @@ export const TABLE_W = 3200;
 export const TABLE_H = 2000;
 export const CARD_W = 100; // 카드 기본 폭 (테이블 좌표)
 export const CARD_H = 140; // 카드 기본 높이
-export const MAX_PLAYERS = 6;
+/** 한 방 최대 인원 (성능 목표: 6~8명 + 오브젝트 100~200개) */
+export const MAX_PLAYERS = 8;
 export const MAX_IDS_PER_REQUEST = 120;
 
 /** 카드 앞면 식별자. 예) "S-A"(스페이드 A), "H-10", "JK-R"(컬러 조커), "T:텍스트"(글자 카드) */
@@ -77,9 +78,17 @@ export interface RoomSettings {
   allowEveryoneDelete: boolean;
 }
 
+/**
+ * 방의 게임 모드. 클라이언트는 이 값으로 화면(모드 컴포넌트)을 고릅니다.
+ * 지금은 "sandbox"(자유 테이블)만 있어요. 새 게임은 client/src/modes/registry.ts 와
+ * server/src/modules.ts 에 등록해서 추가합니다.
+ */
+export type GameMode = "sandbox";
+
 export interface PubRoom {
   code: string;
   name: string;
+  mode: GameMode;
   hostId: string;
   settings: RoomSettings;
   players: PubPlayer[];
@@ -135,6 +144,9 @@ export interface ClientRequests {
   "host:settings": Partial<RoomSettings> & { name?: string };
   "host:kick": { playerId: string };
   cursor: { x: number; y: number }; // ack 없음
+  // 개발자 측정
+  "perf:ping": { t: number };
+  "debug:stats": Record<string, never>;
 }
 
 export interface JoinResult {

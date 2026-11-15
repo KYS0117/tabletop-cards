@@ -17,6 +17,7 @@ import {
   type Background,
   type DeckType,
   type Face,
+  type GameMode,
   type HandCard,
   type Move,
   type PubCard,
@@ -85,6 +86,8 @@ const SCALES = [0.8, 1, 1.25];
 export class Room {
   readonly code: string;
   name: string;
+  /** 현재 게임 모드 (지금은 자유 테이블만) */
+  mode: GameMode = "sandbox";
   hostId = "";
   settings: RoomSettings = { background: "felt", cardScale: 1, allowEveryoneDelete: false };
   players = new Map<string, IPlayer>();
@@ -151,7 +154,7 @@ export class Room {
   }
 
   pubRoom(): PubRoom {
-    return { code: this.code, name: this.name, hostId: this.hostId, settings: { ...this.settings }, players: this.pubPlayers() };
+    return { code: this.code, name: this.name, mode: this.mode, hostId: this.hostId, settings: { ...this.settings }, players: this.pubPlayers() };
   }
 
   pubObjects(): PubObj[] {

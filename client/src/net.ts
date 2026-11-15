@@ -7,6 +7,7 @@
 import { io, type Socket } from "socket.io-client";
 import type { ClientRequests, HandCard, JoinResult, PubCard, PubObj, PubRoom, ServerEvents } from "../../shared/protocol";
 import * as anim from "./anim";
+import { recordNet } from "./perf";
 import { getState, setState, toast, type Session } from "./store";
 
 const SERVER_URL = import.meta.env.VITE_SERVER_URL || undefined; // 비어 있으면 현재 접속한 주소 사용
@@ -82,6 +83,7 @@ export function request<K extends keyof ClientRequests, T = Record<string, unkno
         resolve({ ok: false, error: "서버 응답이 없어요" });
       }
     }, timeoutMs);
+    recordNet("out", ev, data);
     socket.emit(ev, data, (r: Res<T>) => {
       if (done) return;
       done = true;
@@ -100,7 +102,9 @@ export function act<K extends keyof ClientRequests>(ev: K, data: ClientRequests[
 
 /** 빈번한 이벤트(드래그, 커서). 연결이 끊긴 동안에는 버림 */
 export function sendVolatile<K extends "obj:drag" | "cursor">(ev: K, data: ClientRequests[K]) {
-  if (socket.connected) socket.volatile.emit(ev, data);
+  if (!socket.connected) return;
+  recordNet("out", ev, data);
+  socket.volatile.emit(ev, data);
 }
 
 export async function createRoom(nickname: string, roomName: string): Promise<string | null> {
@@ -184,7 +188,10 @@ window.addEventListener("online", () => {
 
 // ---------------- 서버 → 클라이언트 ----------------
 function on<K extends keyof ServerEvents>(ev: K, fn: (d: ServerEvents[K]) => void) {
-  socket.on(ev as string, fn as (d: unknown) => void);
+  socket.on(ev as string, (d: unknown) => {
+    recordNet("in", ev, d);
+    (fn as (d: unknown) => void)(d);
+  });
 }
 
 on("state:full", (d) => {

@@ -9,6 +9,7 @@
 //                  예) https://my-cards.netlify.app
 //                  비워 두면 모든 주소 허용 (개발용)
 //   STATIC_DIR   : 웹사이트 빌드 폴더 위치 (기본 ../client/dist)
+//   ENABLE_METRICS : 1 이면 개발자용 서버 측정 켜기 (/debug/metrics, 화면 성능 창의 서버 항목)
 //
 // ※ 게임방은 메모리에만 저장됩니다. 서버를 재시작하거나 다시 배포하면 모든 방이 사라집니다.
 // =====================================================================
@@ -17,6 +18,7 @@ import { createReadStream, existsSync, statSync } from "node:fs";
 import { extname, join, normalize, resolve, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { Server } from "socket.io";
+import { metricsEnabled, snapshot } from "./metrics";
 import { RoomManager } from "./rooms";
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -45,6 +47,12 @@ function serveStatic(req: IncomingMessage, res: ServerResponse) {
   if (url.pathname === "/healthz") {
     res.writeHead(200, { "content-type": "text/plain" });
     res.end("ok");
+    return;
+  }
+  if (url.pathname === "/debug/metrics") {
+    // ENABLE_METRICS=1 일 때만 (숫자 통계만 있고 게임 내용은 없음)
+    res.writeHead(metricsEnabled ? 200 : 404, { "content-type": "application/json; charset=utf-8", "cache-control": "no-store" });
+    res.end(metricsEnabled ? JSON.stringify(snapshot(manager.counts()), null, 2) : '{"error":"ENABLE_METRICS=1 로 서버를 실행하면 볼 수 있어요"}');
     return;
   }
   if (!existsSync(STATIC_DIR)) {
@@ -78,6 +86,7 @@ io.on("connection", (socket) => manager.handle(socket));
 
 http.listen(PORT, () => {
   console.log(`\n🃏 테이블탑 카드 서버 실행 중: http://localhost:${PORT}`);
+  console.log(`   서버 측정: ${metricsEnabled ? "켜짐 (/debug/metrics)" : "꺼짐 (ENABLE_METRICS=1 로 켜기)"}`);
   console.log(`   CORS 허용: ${CORS.length ? CORS.join(", ") : "모든 주소 (개발 모드)"}`);
   console.log(`   웹사이트 파일: ${existsSync(STATIC_DIR) ? STATIC_DIR : "없음 (개발 중에는 Vite 개발 서버 사용)"}`);
   console.log("   ※ 게임방은 메모리에만 저장돼요. 서버를 재시작하면 모든 방이 사라집니다.\n");

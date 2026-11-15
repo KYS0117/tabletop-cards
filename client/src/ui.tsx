@@ -1,7 +1,7 @@
 // 화면 위아래 도구 모음, 메뉴, 설정, 도움말, 확인창
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import type * as React from "react";
-import type { Background } from "../../shared/protocol";
+import { MAX_PLAYERS, type Background } from "../../shared/protocol";
 import type { Action } from "./actions";
 import { act, leaveRoom } from "./net";
 import { setPrefs, usePrefs } from "./prefs";
@@ -51,7 +51,7 @@ export function TopBar({ onSettings, onHelp, onKick }: { onSettings: () => void;
           </button>
           {open && (
             <div className="players-pop" onPointerDown={(e: React.PointerEvent) => e.stopPropagation()}>
-              <div className="pop-title">참가자 (최대 6명)</div>
+              <div className="pop-title">참가자 (최대 {MAX_PLAYERS}명)</div>
               {room.players.map((p) => (
                 <div key={p.id} className={`prow ${p.connected ? "" : "off"}`}>
                   <i className="pdot" style={{ background: p.color }} />
@@ -345,6 +345,10 @@ export function SettingsModal({ onClose, askConfirm }: { onClose: () => void; as
           <label className="check-row">
             <input type="checkbox" checked={prefs.fan} onChange={(e: React.ChangeEvent<HTMLInputElement>) => setPrefs({ fan: e.target.checked })} />
             손패를 부채꼴로 펼치기
+          </label>
+          <label className="check-row">
+            <input type="checkbox" checked={prefs.perfOverlay} onChange={(e: React.ChangeEvent<HTMLInputElement>) => setPrefs({ perfOverlay: e.target.checked })} />
+            개발자: 성능 측정 창 표시 (Ctrl+Shift+P)
           </label>
         </section>
 

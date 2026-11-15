@@ -3,12 +3,17 @@
   "private": true,
   "version": "0.1.0",
   "description": "친구들과 실시간으로 카드를 직접 집고 옮기는 웹 테이블탑 카드 샌드박스",
-  "workspaces": ["client", "server"],
+  "workspaces": [
+    "client",
+    "server"
+  ],
   "scripts": {
     "dev": "concurrently -k -n server,client -c blue,magenta \"npm run dev -w server\" \"npm run dev -w client\"",
     "build": "npm run build -w client",
     "start": "npm run start -w server",
-    "typecheck": "npm run typecheck -w server && npm run typecheck -w client"
+    "typecheck": "npm run typecheck -w server && npm run typecheck -w client",
+    "test": "npm run test -w server",
+    "bots": "npm run bots -w server --"
   },
   "devDependencies": {
     "concurrently": "^9.1.0"

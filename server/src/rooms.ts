@@ -1,23 +1,18 @@
 // =====================================================================
-// 게임방 목록 관리 + 소켓 이벤트 처리
+// 게임방 목록 관리 + 방 입장/퇴장/방장 관리 (모든 게임 공통 "코어")
+// - 카드 조작 같은 기능별 이벤트는 handlers/*.ts 모듈이 등록합니다 (modules.ts 참고).
 // =====================================================================
 import type { Server, Socket } from "socket.io";
-import { MAX_IDS_PER_REQUEST, type DeckType, type Move } from "../../shared/protocol";
+import { MAX_PLAYERS } from "../../shared/protocol";
+import { trackSocket, type ServerCounts } from "./metrics";
+import { HANDLER_MODULES } from "./modules";
 import { Room, type IPlayer } from "./room";
-import { cleanText, idList, isFiniteNum, isId, newRoomCode, RateLimiter } from "./util";
+import { createRouter, type Ack, type SocketData } from "./router";
+import { cleanText, isId, newRoomCode } from "./util";
 
 const EMPTY_ROOM_TTL_MS = 30 * 60_000; // 아무도 없으면 30분 뒤 방 삭제
 const HOST_AWAY_MS = 20_000; // 방장이 20초 이상 끊겨 있으면 방장 이전
 const PLAYER_AWAY_MS = 30 * 60_000; // 30분 넘게 안 돌아오면 자리 정리
-
-interface SocketData {
-  code?: string;
-  pid?: string;
-  dragLimit: RateLimiter;
-  actionLimit: RateLimiter;
-}
-
-type Ack = (res: unknown) => void;
 
 export class RoomManager {
   rooms = new Map<string, Room>();
@@ -53,41 +48,24 @@ export class RoomManager {
     return room;
   }
 
+  /** 서버 전체 숫자 (개발자 측정용) */
+  counts(): ServerCounts {
+    let players = 0;
+    let objects = 0;
+    for (const r of this.rooms.values()) {
+      players += r.connectedCount();
+      objects += r.objs.size;
+    }
+    return { rooms: this.rooms.size, connections: this.io.sockets.sockets.size, players, objects };
+  }
+
   handle(socket: Socket) {
-    const data = socket.data as SocketData;
-    data.dragLimit = new RateLimiter(60, 90);
-    data.actionLimit = new RateLimiter(15, 30);
-
-    const ctx = (): { room: Room; player: IPlayer } | null => {
-      if (!data.code || !data.pid) return null;
-      const room = this.rooms.get(data.code);
-      const player = room?.players.get(data.pid);
-      if (!room || !player) return null;
-      return { room, player };
-    };
-
-    /** 일반 요청 처리 도우미: 방/플레이어 확인 + 요청 수 제한 + 예외 처리 */
-    const on = (event: string, fn: (c: { room: Room; player: IPlayer }, payload: Record<string, unknown>) => unknown) => {
-      socket.on(event, (payload: unknown, ack?: Ack) => {
-        const reply = typeof ack === "function" ? ack : () => {};
-        try {
-          if (!data.actionLimit.take()) return reply({ ok: false, error: "요청이 너무 많아요. 잠시 후 다시 시도해 주세요" });
-          const c = ctx();
-          if (!c) return reply({ ok: false, error: "방에 접속해 있지 않아요" });
-          const p = payload && typeof payload === "object" ? (payload as Record<string, unknown>) : {};
-          const r = fn(c, p);
-          if (typeof r === "string") reply({ ok: false, error: r });
-          else if (r && typeof r === "object") reply({ ok: true, ...(r as object) });
-          else reply({ ok: true });
-        } catch (e) {
-          console.error(`[error] ${event}`, e);
-          reply({ ok: false, error: "서버 오류가 발생했어요" });
-        }
-      });
-    };
-
-    const hostOnly = (event: string, fn: (c: { room: Room; player: IPlayer }, p: Record<string, unknown>) => unknown) =>
-      on(event, (c, p) => (c.room.isHost(c.player.id) ? fn(c, p) : "방장만 할 수 있어요"));
+    trackSocket(socket);
+    const r = createRouter(socket, this.io, (code) => this.rooms.get(code));
+    const data: SocketData = r.data;
+    const ctx = r.ctx;
+    const on = r.on;
+    const hostOnly = r.hostOnly;
 
     const leaveCurrent = () => {
       const c = ctx();
@@ -141,7 +119,7 @@ export class RoomManager {
       } else {
         if (!nickname) return reply({ ok: false, error: "닉네임을 입력해 주세요" });
         player = room.addPlayer(nickname, tabId);
-        if (!player) return reply({ ok: false, error: "방이 가득 찼어요 (최대 6명)" });
+        if (!player) return reply({ ok: false, error: `방이 가득 찼어요 (최대 ${MAX_PLAYERS}명)` });
       }
       data.code = room.code;
       data.pid = player.id;
@@ -161,123 +139,10 @@ export class RoomManager {
 
     socket.on("disconnect", () => leaveCurrent());
 
-    // ---------------- 실시간 이동 (빈도 높음) ----------------
-    socket.on("obj:drag", (payload: unknown) => {
-      if (!data.dragLimit.take()) return;
-      const c = ctx();
-      if (!c) return;
-      const moves = (payload as { moves?: unknown })?.moves;
-      if (!Array.isArray(moves)) return;
-      const ok = c.room.drag(c.player.id, moves as Move[]);
-      if (ok.length) socket.volatile.to(c.room.code).emit("obj:moving", { by: c.player.id, moves: ok });
-    });
+    // ---------------- 기능 모듈 (카드 조작, 개발자 측정, 앞으로 추가될 게임들) ----------------
+    for (const m of HANDLER_MODULES) m.register(r, { counts: () => this.counts() });
 
-    socket.on("cursor", (payload: unknown) => {
-      if (!data.dragLimit.take()) return;
-      const c = ctx();
-      if (!c) return;
-      const p = payload as { x?: unknown; y?: unknown };
-      if (!isFiniteNum(p?.x) || !isFiniteNum(p?.y)) return;
-      socket.volatile.to(c.room.code).emit("cursor", { by: c.player.id, x: Math.round(p.x), y: Math.round(p.y) });
-    });
-
-    // ---------------- 카드 조작 ----------------
-    const ids = (p: Record<string, unknown>) => idList(p.ids, MAX_IDS_PER_REQUEST);
-
-    on("obj:grab", (c, p) => {
-      const list = ids(p);
-      if (!list) return "잘못된 요청이에요";
-      return { granted: c.room.grab(c.player.id, list) };
-    });
-    on("obj:release", (c, p) => {
-      if (!Array.isArray(p.moves) || p.moves.length > MAX_IDS_PER_REQUEST) return "잘못된 요청이에요";
-      const moves = (p.moves as unknown[]).filter((m): m is Move => !!m && typeof m === "object" && isId((m as Move).id));
-      const merge = isId(p.mergeInto) ? p.mergeInto : null;
-      return c.room.release(c.player.id, moves, merge);
-    });
-    on("obj:flip", (c, p) => {
-      const list = ids(p);
-      if (!list) return "잘못된 요청이에요";
-      c.room.flip(c.player.id, list);
-    });
-    on("obj:rotate", (c, p) => {
-      const list = ids(p);
-      if (!list) return "잘못된 요청이에요";
-      if (!c.room.rotate(c.player.id, list, p.delta as number)) return "회전 값이 올바르지 않아요";
-    });
-    on("obj:toTop", (c, p) => {
-      const list = ids(p);
-      if (!list) return "잘못된 요청이에요";
-      c.room.toTop(c.player.id, list);
-    });
-    on("obj:arrange", (c, p) => {
-      const list = ids(p);
-      if (!list) return "잘못된 요청이에요";
-      c.room.arrange(c.player.id, list);
-    });
-    on("obj:duplicate", (c, p) => {
-      const list = ids(p);
-      if (!list) return "잘못된 요청이에요";
-      return c.room.duplicate(c.player.id, list) ?? undefined;
-    });
-    on("obj:delete", (c, p) => {
-      const list = ids(p);
-      if (!list) return "잘못된 요청이에요";
-      return c.room.remove(c.player.id, list) ?? undefined;
-    });
-
-    // ---------------- 더미 ----------------
-    on("stack:take", (c, p) => {
-      if (!isId(p.stackId)) return "잘못된 요청이에요";
-      const r = c.room.takeTop(c.player.id, p.stackId);
-      return typeof r === "string" ? r : { card: r };
-    });
-    on("stack:draw", (c, p) => {
-      if (!isId(p.stackId)) return "잘못된 요청이에요";
-      return c.room.drawToHand(c.player, p.stackId, Number(p.count) || 1) ?? undefined;
-    });
-    on("stack:deal", (c, p) => {
-      if (!isId(p.stackId)) return "잘못된 요청이에요";
-      return c.room.deal(c.player.id, p.stackId, Number(p.count) || 1) ?? undefined;
-    });
-    on("stack:shuffle", (c, p) => {
-      if (!isId(p.stackId)) return "잘못된 요청이에요";
-      return c.room.shuffle(c.player.id, p.stackId) ?? undefined;
-    });
-    on("stack:spread", (c, p) => {
-      if (!isId(p.stackId)) return "잘못된 요청이에요";
-      return c.room.spread(c.player.id, p.stackId) ?? undefined;
-    });
-    on("stack:create", (c, p) => {
-      const list = ids(p);
-      if (!list) return "잘못된 요청이에요";
-      return c.room.createStack(c.player.id, list) ?? undefined;
-    });
-
-    // ---------------- 손패 ----------------
-    on("hand:take", (c, p) => {
-      const list = ids(p);
-      if (!list) return "잘못된 요청이에요";
-      return c.room.handTake(c.player, list) ?? undefined;
-    });
-    on("hand:play", (c, p) => {
-      if (!isId(p.cardId)) return "잘못된 요청이에요";
-      const r = c.room.handPlay(c.player, p.cardId, p.x as number, p.y as number, !!p.faceUp, !!p.grab);
-      return typeof r === "string" ? r : { card: r };
-    });
-    on("hand:reorder", (c, p) => {
-      const list = idList(p.order, 500);
-      if (!list) return "잘못된 요청이에요";
-      if (!c.room.handReorder(c.player, list)) return "손패 순서가 맞지 않아요";
-    });
-
-    // ---------------- 방장 ----------------
-    hostOnly("host:reset", (c) => c.room.reset());
-    hostOnly("host:gather", (c) => c.room.gather());
-    hostOnly("host:newDeck", (c, p) => {
-      const deck: DeckType = p.deck === "amumal" ? "amumal" : "standard54";
-      c.room.newDeck(deck);
-    });
+    // ---------------- 방장 관리 (모든 게임 공통) ----------------
     hostOnly("host:settings", (c, p) => c.room.updateSettings(p));
     hostOnly("host:kick", (c, p) => {
       if (!isId(p.playerId) || p.playerId === c.player.id) return "잘못된 요청이에요";

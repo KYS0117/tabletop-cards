@@ -9,13 +9,14 @@
 //
 // 모든 위치는 테이블 좌표(월드 좌표)로 서버에 보내므로 화면 크기·확대 배율과 상관없이 모두에게 같은 자리에 보입니다.
 // =====================================================================
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import type * as React from "react";
 import { cardSize, TABLE_H, TABLE_W, type HandCard, type Move, type PubCard, type PubObj } from "../../shared/protocol";
 import * as anim from "./anim";
 import { buildActions, type Action } from "./actions";
 import { CardFace } from "./CardFace";
 import { act, ensureObject, onCursor, request, sendVolatile } from "./net";
+import { count, recordTableRender } from "./perf";
 import { getPrefs, setPrefs, usePrefs } from "./prefs";
 import { getState, myId, playerById, setState, toast, useStore } from "./store";
 import { ActionBar, BottomBar, ConfirmModal, ContextMenu, HelpModal, PromptModal, SettingsModal, Toasts, TopBar } from "./ui";
@@ -45,6 +46,8 @@ const LONG_PRESS_MS = 520;
 let pendingSeq = 0;
 
 export function Table() {
+  const renderStart = performance.now();
+  count("tableRenders");
   const st = useStore();
   const prefs = usePrefs();
   const room = st.room!;
@@ -66,6 +69,11 @@ export function Table() {
   const lastTap = useRef<{ id: string; t: number; x: number; y: number } | null>(null);
   const lastCursor = useRef(0);
   const fitted = useRef(false);
+
+  // 개발자 성능 창: 테이블 렌더+커밋에 걸린 시간 기록 (의존성 없음 = 매 커밋마다 실행)
+  useLayoutEffect(() => {
+    recordTableRender(performance.now() - renderStart);
+  });
 
   const [selection, setSelectionState] = useState<Set<string>>(new Set());
   const selRef = useRef(selection);
@@ -1088,7 +1096,10 @@ export function Table() {
 // =====================================================================
 // 카드/더미 하나
 // =====================================================================
-function ObjView({ o, me, selected, dragging, merge }: { o: PubObj; me: string; selected: boolean; dragging: boolean; merge: boolean }) {
+// memo: 바뀐 카드만 다시 그림. 서버가 바꾼 카드만 새 객체로 보내므로(obj:upsert)
+// 나머지 카드는 같은 객체라 다시 그리지 않습니다. 끄는 중 위치 변화는 anim.ts 가 직접 처리.
+const ObjView = memo(function ObjView({ o, me, selected, dragging, merge }: { o: PubObj; me: string; selected: boolean; dragging: boolean; merge: boolean }) {
+  count("objRenders");
   const ref = useRef<HTMLDivElement>(null);
   useLayoutEffect(() => {
     const el = ref.current!;
@@ -1119,7 +1130,7 @@ function ObjView({ o, me, selected, dragging, merge }: { o: PubObj; me: string; 
       )}
     </div>
   );
-}
+});
 
 // =====================================================================
 // 다른 플레이어의 커서 (테이블 좌표로 표시)

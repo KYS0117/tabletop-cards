@@ -9,10 +9,12 @@ export interface Prefs {
   playFaceDown: boolean;
   handCollapsed: boolean;
   helpSeen: boolean;
+  /** 개발자용 성능 측정 창 */
+  perfOverlay: boolean;
 }
 
 const KEY = "tt-prefs";
-let prefs: Prefs = { shadows: true, animations: true, fan: false, playFaceDown: false, handCollapsed: false, helpSeen: false };
+let prefs: Prefs = { shadows: true, animations: true, fan: false, playFaceDown: false, handCollapsed: false, helpSeen: false, perfOverlay: false };
 try {
   prefs = { ...prefs, ...JSON.parse(localStorage.getItem(KEY) || "{}") };
 } catch {

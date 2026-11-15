@@ -323,3 +323,24 @@ button { cursor: pointer; touch-action: manipulation; }
   .shadows .obj:hover .lift { box-shadow: 0 1px 1px rgba(0, 0, 0, 0.35), 0 2px 6px rgba(0, 0, 0, 0.28); }
   .obj.sel .lift { box-shadow: 0 0 0 calc(3px * var(--cs)) var(--accent), 0 3px 10px rgba(0, 0, 0, 0.35); }
 }
+
+/* ------------------------------------------------------------ 개발자 성능 창 */
+.perf {
+  position: fixed; left: max(8px, env(safe-area-inset-left)); top: calc(56px + env(safe-area-inset-top)); z-index: 98; width: 250px;
+  background: rgba(8, 12, 10, 0.88); color: #dfe; border: 1px solid rgba(255, 255, 255, 0.18); border-radius: 10px; padding: 6px 8px;
+  font: 11px/1.45 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; box-shadow: 0 6px 20px rgba(0, 0, 0, 0.4); touch-action: pan-y;
+  max-height: calc(100vh - 80px); overflow: auto;
+}
+.perf.mini { width: auto; }
+.perf-head { display: flex; align-items: center; gap: 8px; }
+.perf-head button, .perf-actions button { background: rgba(255, 255, 255, 0.1); color: #fff; border: none; border-radius: 6px; padding: 3px 7px; font: inherit; }
+.perf-sec { margin-top: 6px; color: #8fb; font-weight: 700; border-top: 1px solid rgba(255, 255, 255, 0.1); padding-top: 3px; }
+.perf-row { display: flex; justify-content: space-between; gap: 8px; }
+.perf-row span { color: #9ab; white-space: nowrap; }
+.perf-row b { font-weight: 600; text-align: right; }
+.perf .warn { color: #ffd166; }
+.perf .bad { color: #ff6b6b; }
+.perf-actions { display: flex; gap: 6px; margin-top: 6px; }
+.perf-server { white-space: pre-wrap; margin: 6px 0 0; max-height: 220px; overflow: auto; color: #cde; }
+.mode-loading { position: fixed; inset: 0; display: flex; align-items: center; justify-content: center; color: #cde; background: #0e2a1d; }
+@media (max-height: 500px) { .perf { top: 44px; } }
