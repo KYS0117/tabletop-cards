@@ -144,9 +144,9 @@ test("묶기 / 펼치기 / 정렬", () => {
 test("회전 값 검증: 15° 단위만 허용", () => {
   const { room, A } = setup();
   const d = deckOf(room);
-  assert.equal(room.rotate(A.id, [d.id], 7), false);
-  assert.equal(room.rotate(A.id, [d.id], 15), true);
-  assert.equal(room.rotate(A.id, [d.id], -90), true);
+  assert.equal(typeof room.rotate(A.id, [d.id], 7), "string");
+  assert.equal(room.rotate(A.id, [d.id], 15), null);
+  assert.equal(room.rotate(A.id, [d.id], -90), null);
   assert.equal(deckOf(room).rot, 285);
 });
 

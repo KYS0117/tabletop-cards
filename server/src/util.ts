@@ -26,6 +26,11 @@ export function shuffleInPlace<T>(arr: T[]): T[] {
   return arr;
 }
 
+/** 0 이상 n 미만의 공정한 난수 */
+export function randomIndex(n: number): number {
+  return n <= 1 ? 0 : randomInt(n);
+}
+
 export function clamp(v: number, lo: number, hi: number): number {
   return Math.max(lo, Math.min(hi, v));
 }

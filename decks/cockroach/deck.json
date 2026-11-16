@@ -1,0 +1,17 @@
+{
+  "name": "바퀴벌레 포커",
+  "shape": "P",
+  "fillTo": 64,
+  "counts": {},
+  "fallbackBack": "cockroach",
+  "fallbackText": [
+    "🪳 바퀴벌레",
+    "🐀 쥐",
+    "🦇 박쥐",
+    "🪰 파리",
+    "🐸 두꺼비",
+    "🦂 전갈",
+    "🕷️ 거미",
+    "🐞 노린재"
+  ]
+}

@@ -29,6 +29,10 @@ export interface ClientState {
   toasts: Toast[];
   kicked: string | null;
   joining: boolean;
+  /** 큰 알림 (승리 등) */
+  banner: { text: string; kind: string } | null;
+  /** 👁 몰래 본 카드 (나에게만 보임) */
+  peek: { id: string; face: string; back: string; shape?: "P" | "L" } | null;
 }
 
 let state: ClientState = {
@@ -40,7 +44,25 @@ let state: ClientState = {
   toasts: [],
   kicked: null,
   joining: false,
+  banner: null,
+  peek: null,
 };
+
+/** 서버 시계 - 내 시계 (타이머를 모두 같은 시간으로 보여 주기 위함) */
+let serverOffset = 0;
+export function setServerNow(serverNow: number) {
+  if (typeof serverNow === "number") serverOffset = serverNow - Date.now();
+}
+export function serverNow(): number {
+  return Date.now() + serverOffset;
+}
+
+let bannerTimer = 0;
+export function showBanner(text: string, kind: string, ms = 4500) {
+  clearTimeout(bannerTimer);
+  setState({ banner: { text, kind } });
+  bannerTimer = window.setTimeout(() => setState({ banner: null }), ms);
+}
 
 const listeners = new Set<() => void>();
 

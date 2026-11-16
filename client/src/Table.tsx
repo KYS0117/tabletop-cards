@@ -4,7 +4,10 @@
 // [PC]   왼쪽 드래그: 카드 집기/이동 · 빈 곳 드래그: 화면 이동 · Shift+빈 곳 드래그: 영역 선택
 //        Shift+클릭: 여러 장 선택 · 더블클릭: 뒤집기 · Q/E: 15° 회전 · F: 뒤집기 · Delete: 삭제
 //        우클릭: 메뉴 · 휠: 확대/축소 · 더미를 끌면 맨 위 1장, 더미 모서리 손잡이(⠿)를 끌면 더미 전체
+//        더미를 꾹(약 0.4초) 누른 채 끌면 더미 전체 이동
 // [모바일] 한 손가락 드래그: 카드 이동(빈 곳이면 화면 이동) · 더블탭: 뒤집기 · 길게 누르기: 메뉴
+//        더미를 꾹 누르면 들리고 → 그대로 끌면 더미 전체 이동, 움직이지 않고 떼면 메뉴
+// [공통] 🔒 잠긴 카드/더미는 끌면 화면이 이동 (잠긴 더미에서 한 장 뽑기는 가능)
 //        두 손가락: 확대/축소 + 화면 이동 · "다중 선택" 모드: 탭으로 여러 장 선택, 빈 곳 드래그로 영역 선택
 //
 // 모든 위치는 테이블 좌표(월드 좌표)로 서버에 보내므로 화면 크기·확대 배율과 상관없이 모두에게 같은 자리에 보입니다.
@@ -15,9 +18,11 @@ import { cardSize, TABLE_H, TABLE_W, type HandCard, type Move, type PubCard, typ
 import * as anim from "./anim";
 import { buildActions, type Action } from "./actions";
 import { CardFace } from "./CardFace";
+import { Banner, ClaimPanel, CustomCardModal, GameBar, GameSelectModal, PeekModal, UnoButton } from "./gametools";
 import { act, ensureObject, onCursor, request, sendVolatile } from "./net";
 import { count, recordTableRender } from "./perf";
 import { getPrefs, setPrefs, usePrefs } from "./prefs";
+import * as sound from "./sound";
 import { getState, myId, playerById, setState, toast, useStore } from "./store";
 import { ActionBar, BottomBar, ConfirmModal, ContextMenu, HelpModal, PromptModal, SettingsModal, Toasts, TopBar } from "./ui";
 
@@ -25,7 +30,7 @@ type Target = { t: "obj"; id: string } | { t: "grip"; id: string } | { t: "empty
 
 type G =
   | { kind: "none" }
-  | { kind: "press"; pid: number; sx: number; sy: number; target: Target; shift: boolean; touch: boolean; button: number }
+  | { kind: "press"; pid: number; sx: number; sy: number; target: Target; shift: boolean; touch: boolean; button: number; held?: boolean }
   | { kind: "drag"; pid: number; ids: string[]; off: Map<string, { dx: number; dy: number }>; primary: string; lastSent: number; cx: number; cy: number }
   | { kind: "pending"; pid: number; what: "take" | "play"; off: { dx: number; dy: number }; cx: number; cy: number; released: boolean; seq: number }
   | { kind: "handDrag"; pid: number; cardId: string; cx: number; cy: number; gx: number; gy: number }
@@ -42,6 +47,10 @@ interface Cam {
 const DRAG_SEND_MS = 40; // 드래그 위치 전송 간격 (초당 약 25회)
 const CURSOR_SEND_MS = 90;
 const LONG_PRESS_MS = 520;
+const DECK_HOLD_MS = 400; // 더미를 이만큼 누르고 있으면 "더미 전체 들기"
+
+/** 카드/더미의 실제 크기 (세로형/가로형) */
+const sizeOf = (o: { shape?: PubObj["shape"] } | undefined, scale = getState().room?.settings.cardScale ?? 1) => cardSize(scale, o?.shape);
 
 let pendingSeq = 0;
 
@@ -53,7 +62,6 @@ export function Table() {
   const room = st.room!;
   const me = st.session?.playerId ?? "";
   const scale = room.settings.cardScale;
-  const { w: CW, h: CH } = cardSize(scale);
 
   const viewRef = useRef<HTMLDivElement>(null);
   const worldRef = useRef<HTMLDivElement>(null);
@@ -68,6 +76,7 @@ export function Table() {
   const longTimer = useRef<number | null>(null);
   const lastTap = useRef<{ id: string; t: number; x: number; y: number } | null>(null);
   const lastCursor = useRef(0);
+  const lastPinToast = useRef(0);
   const fitted = useRef(false);
 
   // 개발자 성능 창: 테이블 렌더+커밋에 걸린 시간 기록 (의존성 없음 = 매 커밋마다 실행)
@@ -87,7 +96,8 @@ export function Table() {
   const [handHover, setHandHover] = useState(false);
   const handHoverRef = useRef(false);
   const [selRect, setSelRect] = useState<{ x0: number; y0: number; x1: number; y1: number } | null>(null);
-  const [placeholder, setPlaceholder] = useState<{ face: string | null; back: PubObj["back"] } | null>(null);
+  const [placeholder, setPlaceholder] = useState<{ face: string | null; back: PubObj["back"]; shape?: PubObj["shape"] } | null>(null);
+  const [liftId, setLiftId] = useState<string | null>(null); // 꾹 눌러서 들린 더미
   const [ghost, setGhost] = useState<HandCard | null>(null);
   const [handInsert, setHandInsert] = useState<number | null>(null);
   const [handDragId, setHandDragId] = useState<string | null>(null);
@@ -99,6 +109,8 @@ export function Table() {
   const [confirm, setConfirm] = useState<{ text: string; onOk: () => void } | null>(null);
   const [showSettings, setShowSettings] = useState(false);
   const [showHelp, setShowHelp] = useState(!getPrefs().helpSeen);
+  const [showGame, setShowGame] = useState(false);
+  const [custom, setCustom] = useState<{ stackId?: string } | null>(null);
   const [handW, setHandW] = useState(600);
   const [zoomPct, setZoomPct] = useState(40);
 
@@ -146,9 +158,9 @@ export function Table() {
       let box = { x0: 0, y0: 0, x1: TABLE_W, y1: TABLE_H };
       const objs = [...getState().objects.values()];
       if (!all && objs.length) {
-        const { w, h } = cardSize(getState().room?.settings.cardScale ?? 1);
         let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
         for (const o of objs) {
+          const { w, h } = sizeOf(o);
           x0 = Math.min(x0, o.x - w);
           y0 = Math.min(y0, o.y - h);
           x1 = Math.max(x1, o.x + w);
@@ -253,11 +265,11 @@ export function Table() {
   };
 
   const findMergeTarget = (ids: string[], px: number, py: number): string | null => {
-    const { w, h } = cardSize(getState().room?.settings.cardScale ?? 1);
     let best: string | null = null;
     let bestD = Infinity;
     for (const o of getState().objects.values()) {
       if (o.kind !== "stack" || ids.includes(o.id) || lockedByOther(o)) continue;
+      const { w, h } = sizeOf(o);
       const dx = Math.abs(o.x - px);
       const dy = Math.abs(o.y - py);
       if (dx < w * 0.5 && dy < h * 0.5 && dx + dy < bestD) {
@@ -269,9 +281,9 @@ export function Table() {
   };
 
   const objectsAt = (wx: number, wy: number): PubObj[] => {
-    const { w, h } = cardSize(getState().room?.settings.cardScale ?? 1);
     return [...getState().objects.values()]
       .filter((o) => {
+        const { w, h } = sizeOf(o);
         // 회전을 고려한 판정
         const rad = (-o.rot * Math.PI) / 180;
         const dx = wx - o.x;
@@ -310,7 +322,7 @@ export function Table() {
                 setSelection(new Set([next.id]));
               }
             : undefined;
-        const actions = buildActions({ ids, openPrompt, clearSelection: () => setSelection(new Set()), selectBelow });
+        const actions = buildActions({ ids, openPrompt, clearSelection: () => setSelection(new Set()), selectBelow, openCustom: (stackId) => setCustom({ stackId }) });
         if (!actions.length) {
           toast("다른 사람이 잡고 있는 카드예요", "warn");
           return;
@@ -324,10 +336,14 @@ export function Table() {
           { key: "fitAll", label: "테이블 전체 보기", icon: "🔭", run: () => fit(true) },
         ];
         if (selRef.current.size) actions.push({ key: "clear", label: "선택 해제", icon: "✕", run: () => setSelection(new Set()) });
+        actions.push({ key: "custom", label: "직접 쓰는 카드 만들기…", icon: "✍", run: () => setCustom({}) });
         if (getState().room?.hostId === myId()) {
           actions.push(
+            { key: "game", label: "게임 고르기…", icon: "🎲", run: () => setShowGame(true) },
             { key: "deck", label: "트럼프 54장 덱 추가", icon: "🂠", run: () => act("host:newDeck", { deck: "standard54" }) },
-            { key: "deck2", label: "단어 카드 덱 추가", icon: "💍", run: () => act("host:newDeck", { deck: "amumal" }) },
+            { key: "deck2", label: "우노 덱 추가", icon: "🌈", run: () => act("host:newDeck", { deck: "uno108" }) },
+            { key: "deck3", label: "프로포즈 카드 덱 추가", icon: "💍", run: () => act("host:newDeck", { deck: "propose" }) },
+            { key: "deck4", label: "바퀴벌레 포커 덱 추가", icon: "🪳", run: () => act("host:newDeck", { deck: "cockroach" }) },
           );
         }
         setMenu({ x: cx, y: cy, actions, title: "테이블" });
@@ -343,7 +359,7 @@ export function Table() {
     const me = myId();
     const usable = ids.filter((id) => {
       const o = objOf(id);
-      return o && !(o.lockedBy && o.lockedBy !== me);
+      return o && !o.pinned && !(o.lockedBy && o.lockedBy !== me);
     });
     if (!usable.includes(primary)) {
       const o = objOf(primary);
@@ -360,6 +376,7 @@ export function Table() {
     }
     g.current = { kind: "drag", pid, ids: usable, off, primary, lastSent: 0, cx, cy };
     setDragging(new Set(usable));
+    sound.sfx("pick");
     request<"obj:grab", { granted: string[] }>("obj:grab", { ids: usable }).then((r) => {
       const cur = g.current;
       const granted = new Set(r.ok ? r.granted : []);
@@ -380,6 +397,11 @@ export function Table() {
   /** 더미 맨 위 카드를 끌어 한 장 뽑기: 서버 응답 전까지는 임시 카드를 보여 줌 */
   const startTake = (s: PubObj, cx: number, cy: number, pid: number) => {
     if (s.kind !== "stack") return;
+    if (s.count === 0) {
+      // 빈 더미(버린 카드 자리 등)는 끌어도 아무것도 없음 → 화면 이동처럼 동작하지 않게 그냥 무시
+      g.current = { kind: "none" };
+      return;
+    }
     if (lockedByOther(s)) {
       toast(`${playerById(s.lockedBy)?.nickname ?? "다른 사람"}님이 잡고 있어요`, "warn");
       g.current = { kind: "none" };
@@ -388,7 +410,8 @@ export function Table() {
     const w = toWorld(cx, cy);
     const seq = ++pendingSeq;
     g.current = { kind: "pending", pid, what: "take", off: { dx: s.x - w.x, dy: s.y - w.y }, cx, cy, released: false, seq };
-    setPlaceholder({ face: s.faceUp ? s.top : null, back: s.back });
+    setPlaceholder({ face: s.faceUp ? s.top : null, back: s.back, shape: s.shape });
+    sound.sfx("draw");
     movePlaceholder(cx, cy);
     request<"stack:take", { card: PubCard }>("stack:take", { stackId: s.id }).then((r) => onPendingResult(seq, r));
   };
@@ -511,6 +534,7 @@ export function Table() {
     setHandHover(false);
     setMergeTarget(null);
     setDragging(new Set());
+    sound.sfx(toHand ? "draw" : "place");
     if (toHand) {
       request("hand:take", { ids: cur.ids }).then((r) => {
         if (!r.ok) {
@@ -529,13 +553,21 @@ export function Table() {
   // ------------------------------------------------------------------
   // 손패에서 끌기
   // ------------------------------------------------------------------
-  const handIndexAt = (cx: number, dragId: string) => {
+  /** 손패 안에서 놓을 자리 (손패가 두 줄이면 가까운 줄 기준) */
+  const handIndexAt = (cx: number, cy: number, dragId: string) => {
     const els = [...(handCardsRef.current?.querySelectorAll<HTMLElement>("[data-hid]") ?? [])].filter((e) => e.dataset.hid !== dragId);
-    let i = 0;
-    for (const e of els) {
-      const r = e.getBoundingClientRect();
-      if (cx > r.left + r.width / 2) i++;
+    const info = els.map((e) => ({ row: Number(e.dataset.row ?? 0), r: e.getBoundingClientRect() }));
+    let prow = 0;
+    let best = Infinity;
+    for (const { row, r } of info) {
+      const d = Math.abs(cy - (r.top + r.height / 2));
+      if (d < best) {
+        best = d;
+        prow = row;
+      }
     }
+    let i = 0;
+    for (const { row, r } of info) if (row < prow || (row === prow && cx > r.left + r.width / 2)) i++;
     return i;
   };
 
@@ -556,13 +588,14 @@ export function Table() {
       setHandInsert(null);
       // 손패 고스트를 테이블 카드 크기에 맞춰 줄이기
       const gh = ghostRef.current;
-      if (gh) gh.style.setProperty("--gscale", String((cardSize(getState().room?.settings.cardScale ?? 1).w * sc) / gh.getBoundingClientRect().width));
+      const hc = getState().hand.find((h) => h.id === cardId);
+      if (gh) gh.style.setProperty("--gscale", String((sizeOf(hc).w * sc) / gh.getBoundingClientRect().width));
       request<"hand:play", { card: PubCard }>("hand:play", { cardId, x: w.x, y: w.y, faceUp: !getPrefs().playFaceDown, grab: true }).then((r) =>
         onPendingResult(seq, r),
       );
       return;
     }
-    setHandInsert(handIndexAt(cx, cur.cardId));
+    setHandInsert(handIndexAt(cx, cy, cur.cardId));
   };
 
   const endHandDrag = () => {
@@ -570,7 +603,7 @@ export function Table() {
     if (cur.kind !== "handDrag") return;
     g.current = { kind: "none" };
     const hand = getState().hand;
-    const idx = handIndexAt(cur.cx, cur.cardId);
+    const idx = handIndexAt(cur.cx, cur.cy, cur.cardId);
     setGhost(null);
     setHandInsert(null);
     setHandDragId(null);
@@ -623,8 +656,25 @@ export function Table() {
       return;
     }
     g.current = { kind: "press", pid: e.pointerId, sx: e.clientX, sy: e.clientY, target, shift: e.shiftKey || e.ctrlKey || e.metaKey, touch, button: e.button };
+    clearLongPress();
+    const tobj = target.t === "obj" ? objOf(target.id) : undefined;
+    if (tobj?.kind === "stack" && !tobj.pinned && e.button === 0) {
+      // 더미 꾹 누르기 → 더미 전체 들기 (끌면 더미 전체 이동, 터치로 그냥 떼면 메뉴)
+      const pid = e.pointerId;
+      const sid = tobj.id;
+      longTimer.current = window.setTimeout(() => {
+        longTimer.current = null;
+        const cur = g.current;
+        if (cur.kind !== "press" || cur.pid !== pid) return;
+        if (lockedByOther(objOf(sid))) return;
+        cur.held = true;
+        setLiftId(sid);
+        navigator.vibrate?.(20);
+        sound.sfx("pick", 0.6);
+      }, DECK_HOLD_MS);
+      return;
+    }
     if (touch) {
-      clearLongPress();
       const sx = e.clientX;
       const sy = e.clientY;
       longTimer.current = window.setTimeout(() => {
@@ -679,6 +729,23 @@ export function Table() {
       return;
     }
     const sel = selRef.current;
+    // 🔒 잠긴 것: 낱장·손잡이·여러 장 끌기는 화면 이동으로 (잠긴 더미 본체를 끌면 한 장 뽑기는 그대로)
+    if (o.pinned && (o.kind === "card" || tgt.t === "grip" || (sel.has(o.id) && sel.size > 1))) {
+      const now = performance.now();
+      if (now - lastPinToast.current > 2500) {
+        lastPinToast.current = now;
+        toast("🔒 잠겨 있어요 · 메뉴에서 잠금을 풀 수 있어요");
+      }
+      g.current = { kind: "pan", pid: cur.pid, sx: cur.sx, sy: cur.sy, camX: cam.current.x, camY: cam.current.y };
+      return;
+    }
+    if (cur.held && o.kind === "stack") {
+      setLiftId(null);
+      setSelection(new Set([o.id]));
+      startDrag([o.id], cur.sx, cur.sy, cur.pid, o.id);
+      moveDrag(cx, cy);
+      return;
+    }
     if (tgt.t === "obj" && o.kind === "stack" && !(sel.has(o.id) && sel.size > 1)) {
       startTake(o, cur.sx, cur.sy, cur.pid);
       const p = g.current;
@@ -729,6 +796,7 @@ export function Table() {
           const dist = Math.hypot(e.clientX - cur.sx, e.clientY - cur.sy);
           if (dist < (cur.touch ? 9 : 4)) return;
           clearLongPress();
+          setLiftId(null);
           beginFromPress(cur, e.clientX, e.clientY);
           return;
         }
@@ -776,8 +844,15 @@ export function Table() {
         case "press": {
           if (e.pointerId !== cur.pid) return;
           g.current = { kind: "none" };
+          setLiftId(null);
           if (cancelled) return;
           const tgt = cur.target;
+          if (cur.held) {
+            // 꾹 눌렀다가 움직이지 않고 뗌: 터치는 메뉴, 마우스는 선택만
+            if (cur.touch) openMenuFor(e.clientX, e.clientY, tgt);
+            else setSelection(new Set([tgt.t === "obj" || tgt.t === "grip" ? tgt.id : ""].filter(Boolean)));
+            return;
+          }
           if (tgt.t === "obj" || tgt.t === "grip") {
             const now = performance.now();
             const lt = lastTap.current;
@@ -917,7 +992,10 @@ export function Table() {
   // ------------------------------------------------------------------
   const objects = useMemo(() => [...st.objects.values()], [st.objects]);
   const selActions = useMemo(
-    () => (selection.size ? buildActions({ ids: [...selection], openPrompt, clearSelection: () => setSelection(new Set()) }) : []),
+    () =>
+      selection.size
+        ? buildActions({ ids: [...selection], openPrompt, clearSelection: () => setSelection(new Set()), openCustom: (stackId) => setCustom({ stackId }) })
+        : [],
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [selection, st.objects, st.room],
   );
@@ -925,16 +1003,30 @@ export function Table() {
   const hand = st.hand;
   const shortScreen = typeof window !== "undefined" && window.innerHeight < 500; // 가로 모드 휴대폰
   const handScale = shortScreen ? 0.5 : handW < 560 ? 0.62 : 0.84;
-  const hcw = 100 * handScale;
   const n = hand.length;
-  const spacing = n > 1 ? Math.min(hcw + 8, (handW - hcw - 8) / (n - 1)) : 0;
-  const totalW = n ? hcw + spacing * (n - 1) : 0;
-  const startX = Math.max(0, (handW - totalW) / 2);
+  const allL = n > 0 && hand.every((c) => c.shape === "L");
+  const hcw = (hand.some((c) => c.shape === "L") ? 140 : 100) * handScale;
+  const hch = (allL ? 100 : 140) * handScale;
+  const fitSpacing = (cnt: number) => (cnt > 1 ? Math.min(hcw + 8, (handW - hcw - 8) / (cnt - 1)) : 0);
+  // 손패가 많이 겹쳐 카드 내용이 가려지면 여러 줄로 펼침 (가로 모드 휴대폰은 높이가 낮아 최대 2줄)
+  const maxRows = shortScreen ? 2 : 3;
+  let handRows = 1;
+  while (handRows < maxRows && n > handRows && fitSpacing(Math.ceil(n / handRows)) < hcw * 0.55) handRows++;
+  const perRow = Math.ceil(n / handRows);
+  const spacing = fitSpacing(perRow);
+  const rowH = hch * 0.7;
+  const slot = (k: number) => {
+    const row = Math.min(handRows - 1, Math.floor(k / perRow));
+    const cnt = row === handRows - 1 ? n - perRow * row : perRow;
+    const sp = handRows > 1 ? fitSpacing(cnt) : spacing;
+    const startX = Math.max(0, (handW - (hcw + sp * (cnt - 1))) / 2);
+    return { x: startX + (k - row * perRow) * sp, y: row * rowH, row };
+  };
 
   const players = room.players;
 
   return (
-    <div className={`app bg-${room.settings.background} ${prefs.shadows ? "shadows" : "noshadows"}`}>
+    <div className={`app bg-${room.settings.background} ${prefs.shadows ? "shadows" : "noshadows"} ${room.preset === "cockroach" && room.claim ? "has-claim" : ""}`}>
       <div
         className="view"
         ref={viewRef}
@@ -952,10 +1044,11 @@ export function Table() {
               selected={selection.has(o.id)}
               dragging={dragging.has(o.id)}
               merge={mergeTarget === o.id}
+              lifted={liftId === o.id}
             />
           ))}
           {placeholder && (
-            <div className="obj k-card dragging placeholder" ref={placeholderRef} style={{ zIndex: 999999 }}>
+            <div className={`obj k-card dragging placeholder ${placeholder.shape === "L" ? "shape-L" : ""}`} ref={placeholderRef} style={{ zIndex: 999999 }}>
               <div className="lift">
                 <CardFace face={placeholder.face} back={placeholder.back} />
               </div>
@@ -976,9 +1069,12 @@ export function Table() {
         </div>
       </div>
 
+      <GameBar onPickGame={() => setShowGame(true)} onCustom={() => setCustom({})} />
+      <ClaimPanel />
       <TopBar onSettings={() => setShowSettings(true)} onHelp={() => setShowHelp(true)} onKick={(id, name) => setConfirm({ text: `${name}님을 내보낼까요?`, onOk: () => act("host:kick", { playerId: id }) })} />
 
       <div className="bottom" ref={bottomRef}>
+        <UnoButton />
         {selActions.length > 0 && (
           <ActionBar
             count={selection.size}
@@ -1011,30 +1107,40 @@ export function Table() {
                 title: "덱 추가 (방장)",
                 actions: [
                   { key: "d1", label: "트럼프 54장 (조커 포함)", icon: "🂠", run: () => act("host:newDeck", { deck: "standard54" }) },
-                  { key: "d2", label: "단어 카드 덱 (아무말 청혼)", icon: "💍", run: () => act("host:newDeck", { deck: "amumal" }) },
+                  { key: "d2", label: "우노 108장", icon: "🌈", run: () => act("host:newDeck", { deck: "uno108" }) },
+                  { key: "d3", label: "프로포즈 카드 덱", icon: "💍", run: () => act("host:newDeck", { deck: "propose" }) },
+                  { key: "d4", label: "바퀴벌레 포커 덱", icon: "🪳", run: () => act("host:newDeck", { deck: "cockroach" }) },
                 ],
               })
             }
           />
           {!prefs.handCollapsed && (
-            <div className={`hand-cards ${prefs.fan ? "fan" : ""}`} ref={handCardsRef} style={{ "--cs": handScale, height: n === 0 ? 34 : 140 * handScale + (prefs.fan ? 22 : 10) } as React.CSSProperties}>
+            <div
+              className={`hand-cards ${prefs.fan && handRows === 1 ? "fan" : ""} ${allL ? "all-L" : ""}`}
+              ref={handCardsRef}
+              style={{ "--cs": handScale, height: n === 0 ? 34 : hch + rowH * (handRows - 1) + (prefs.fan && handRows === 1 ? 22 : 10) } as React.CSSProperties}
+            >
               {n === 0 && <div className="hand-empty">손패가 비어 있어요 · 테이블의 카드를 여기로 끌어오거나 더미 메뉴에서 뽑으세요</div>}
               {hand.map((c, i) => {
                 const mid = (n - 1) / 2;
-                const angle = prefs.fan ? (i - mid) * Math.min(6, 40 / Math.max(1, n)) : 0;
-                const lift = prefs.fan ? Math.abs(i - mid) * Math.abs(i - mid) * 0.6 : 0;
-                let x = startX + i * spacing;
+                const fan = prefs.fan && handRows === 1;
+                const angle = fan ? (i - mid) * Math.min(6, 40 / Math.max(1, n)) : 0;
+                const lift = fan ? Math.abs(i - mid) * Math.abs(i - mid) * 0.6 : 0;
+                let k = i;
                 if (handInsert !== null && handDragId) {
                   const without = hand.filter((h) => h.id !== handDragId);
                   const pos = without.findIndex((h) => h.id === c.id);
-                  if (pos >= 0) x = startX + (pos >= handInsert ? pos + 1 : pos) * spacing;
+                  if (pos >= 0) k = pos >= handInsert ? pos + 1 : pos;
                 }
+                const sl = slot(k);
+                const x = sl.x;
                 return (
                   <div
                     key={c.id}
-                    className={`hcard ${handDragId === c.id ? "hidden" : ""}`}
+                    className={`hcard ${c.shape === "L" ? "shape-L" : ""} ${handDragId === c.id ? "hidden" : ""}`}
                     data-hid={c.id}
-                    style={{ transform: `translate(${x}px, ${lift}px) rotate(${angle}deg)`, zIndex: i + 1 }}
+                    data-row={slot(i).row}
+                    style={{ transform: `translate(${x}px, ${sl.y + lift}px) rotate(${angle}deg)`, zIndex: i + 1 }}
                     onPointerDown={(e: React.PointerEvent<HTMLDivElement>) => onHandPointerDown(e, c.id)}
                   >
                     <CardFace face={c.face} back={c.back} />
@@ -1047,7 +1153,7 @@ export function Table() {
       </div>
 
       {ghost && (
-        <div className="hand-ghost" ref={ghostRef} style={{ "--cs": handScale } as React.CSSProperties}>
+        <div className={`hand-ghost ${ghost.shape === "L" ? "shape-L" : ""}`} ref={ghostRef} style={{ "--cs": handScale } as React.CSSProperties}>
           <div className="ghost-inner">
             <CardFace face={getPrefs().playFaceDown ? null : ghost.face} back={ghost.back} />
           </div>
@@ -1055,7 +1161,18 @@ export function Table() {
       )}
 
       {menu && <ContextMenu {...menu} onClose={() => setMenu(null)} />}
-      {showSettings && <SettingsModal onClose={() => setShowSettings(false)} askConfirm={(text, onOk) => setConfirm({ text, onOk })} />}
+      {showSettings && (
+        <SettingsModal
+          onClose={() => setShowSettings(false)}
+          askConfirm={(text, onOk) => setConfirm({ text, onOk })}
+          onPickGame={() => {
+            setShowSettings(false);
+            setShowGame(true);
+          }}
+        />
+      )}
+      {showGame && <GameSelectModal onClose={() => setShowGame(false)} askConfirm={(text, onOk) => setConfirm({ text, onOk })} />}
+      {custom && <CustomCardModal stackId={custom.stackId} onClose={() => setCustom(null)} />}
       {showHelp && (
         <HelpModal
           onClose={() => {
@@ -1086,6 +1203,8 @@ export function Table() {
           onCancel={() => setConfirm(null)}
         />
       )}
+      <PeekModal />
+      <Banner />
       <Toasts />
       {st.status !== "online" && <div className="conn-banner">⚡ 연결이 끊겼어요. 다시 연결하는 중…</div>}
       {players.length === 0 && null}
@@ -1098,7 +1217,7 @@ export function Table() {
 // =====================================================================
 // memo: 바뀐 카드만 다시 그림. 서버가 바꾼 카드만 새 객체로 보내므로(obj:upsert)
 // 나머지 카드는 같은 객체라 다시 그리지 않습니다. 끄는 중 위치 변화는 anim.ts 가 직접 처리.
-const ObjView = memo(function ObjView({ o, me, selected, dragging, merge }: { o: PubObj; me: string; selected: boolean; dragging: boolean; merge: boolean }) {
+const ObjView = memo(function ObjView({ o, me, selected, dragging, merge, lifted }: { o: PubObj; me: string; selected: boolean; dragging: boolean; merge: boolean; lifted: boolean }) {
   count("objRenders");
   const ref = useRef<HTMLDivElement>(null);
   useLayoutEffect(() => {
@@ -1112,17 +1231,30 @@ const ObjView = memo(function ObjView({ o, me, selected, dragging, merge }: { o:
   if (dragging) cls.push("dragging");
   if (holder) cls.push("held");
   if (merge) cls.push("merge");
+  if (lifted) cls.push("lifted");
+  if (o.shape === "L") cls.push("shape-L");
+  if (o.pinned) cls.push("pinned");
+  const empty = o.kind === "stack" && o.count === 0;
+  if (empty) cls.push("empty");
   const thick = o.kind === "stack" ? Math.min(6, Math.ceil(o.count / 9)) : 0;
   return (
     <div ref={ref} className={cls.join(" ")} data-oid={o.id} style={{ zIndex: dragging ? 500000 + o.z : o.z }}>
       <div className={`lift thick-${thick}`}>
-        {o.kind === "card" ? <CardFace face={o.face} back={o.back} /> : <CardFace face={o.faceUp ? o.top : null} back={o.back} />}
+        {o.kind === "card" ? (
+          <CardFace face={o.face} back={o.back} />
+        ) : empty ? (
+          <div className="pile-empty">{o.label ?? "빈 자리"}</div>
+        ) : (
+          <CardFace face={o.faceUp ? o.top : null} back={o.back} />
+        )}
       </div>
+      {o.kind === "stack" && o.label && !empty && <div className="pile-label">{o.label}</div>}
       {o.kind === "stack" && (
-        <div className="grip" data-grip={o.id} title="여기를 끌면 더미 전체 이동">
-          ⠿ {o.count}
+        <div className="grip" data-grip={o.id} title={o.pinned ? "잠긴 더미" : "여기를 끌거나, 더미를 꾹 누른 채 끌면 더미 전체 이동"}>
+          {o.pinned ? "🔒" : "⠿"} {o.count}
         </div>
       )}
+      {o.kind === "card" && o.pinned && <div className="pin-badge">🔒</div>}
       {holder && (
         <div className="holder" style={{ background: holder.color }}>
           {holder.nickname}

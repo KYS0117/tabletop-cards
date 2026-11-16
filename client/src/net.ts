@@ -8,7 +8,8 @@ import { io, type Socket } from "socket.io-client";
 import type { ClientRequests, HandCard, JoinResult, PubCard, PubObj, PubRoom, ServerEvents } from "../../shared/protocol";
 import * as anim from "./anim";
 import { recordNet } from "./perf";
-import { getState, setState, toast, type Session } from "./store";
+import * as sound from "./sound";
+import { getState, setServerNow, setState, showBanner, toast, type Session } from "./store";
 
 const SERVER_URL = import.meta.env.VITE_SERVER_URL || undefined; // 비어 있으면 현재 접속한 주소 사용
 
@@ -201,14 +202,28 @@ on("state:full", (d) => {
     objects.set(o.id, o);
     anim.setTarget(o.id, o.x, o.y, o.rot, true);
   }
+  setServerNow(d.room.serverNow);
   setState({ room: d.room, objects, hand: d.hand, kicked: null });
+  sound.setBgm(d.room.bgm?.track ?? null);
 });
 
-on("room:update", (d) => setState({ room: d.room }));
+on("room:update", (d) => {
+  setServerNow(d.room.serverNow);
+  if (d.room.bgm?.track !== getState().room?.bgm?.track) sound.setBgm(d.room.bgm?.track ?? null);
+  setState({ room: d.room });
+});
 
 on("obj:upsert", (d) => {
   const objects = new Map(getState().objects);
+  const me = getState().session?.playerId;
   for (const o of d.objects) {
+    const prev = objects.get(o.id);
+    // 효과음: 뒤집기는 누구 것이든, 다른 사람이 집고 놓는 소리는 작게
+    if (prev && prev.faceUp !== o.faceUp) sound.sfx("flip");
+    else if (prev && prev.lockedBy !== o.lockedBy) {
+      if (o.lockedBy && o.lockedBy !== me) sound.sfx("pick", 0.35);
+      else if (!o.lockedBy && prev.lockedBy && prev.lockedBy !== me) sound.sfx("place", 0.4);
+    } else if (prev && prev.kind === "stack" && o.kind === "stack" && o.count > prev.count) sound.sfx("place", 0.6);
     const isNew = !objects.has(o.id);
     objects.set(o.id, o);
     anim.setTarget(o.id, o.x, o.y, o.rot, isNew);
@@ -236,10 +251,28 @@ on("obj:moving", (d) => {
   }
 });
 
-on("hand:update", (d) => setState({ hand: d.hand as HandCard[] }));
+on("peek", (d) => setState({ peek: d }));
+
+on("hand:update", (d) => {
+  if (d.hand.length > getState().hand.length) sound.sfx("draw");
+  setState({ hand: d.hand as HandCard[] });
+});
 
 on("notice", (d) => {
-  toast(d.text, d.kind ?? "info");
+  if (d.kind !== "win") toast(d.text, d.kind ?? "info"); // 승리는 큰 배너로만
+  if (d.kind === "shuffle") sound.sfx("shuffle");
+  else if (d.kind === "deal") sound.sfx("deal");
+  else if (d.kind === "ring") sound.sfx("ring");
+  else if (d.kind === "join") sound.sfx("join");
+  else if (d.kind === "uno") {
+    sound.sfx("uno");
+    showBanner(d.text, "uno", 2200);
+  } else if (d.kind === "claim") sound.sfx("claim");
+  else if (d.kind === "peek") sound.sfx("peek", 0.6);
+  else if (d.kind === "win") {
+    sound.sfx("win");
+    showBanner(d.text, "win");
+  }
   if (d.kind === "shuffle" && d.stackId) {
     const el = document.querySelector(`[data-oid="${CSS.escape(d.stackId)}"]`);
     el?.classList.remove("shuffling");

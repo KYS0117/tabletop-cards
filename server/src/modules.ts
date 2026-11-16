@@ -9,6 +9,7 @@ import type { Router } from "./router";
 import type { ServerCounts } from "./metrics";
 import { registerSandboxHandlers } from "./handlers/sandbox";
 import { registerDebugHandlers } from "./handlers/debug";
+import { registerToolHandlers } from "./handlers/tools";
 
 export interface ModuleDeps {
   counts: () => ServerCounts;
@@ -21,5 +22,6 @@ export interface HandlerModule {
 
 export const HANDLER_MODULES: HandlerModule[] = [
   { id: "sandbox", register: (r) => registerSandboxHandlers(r) },
+  { id: "tools", register: (r) => registerToolHandlers(r) },
   { id: "debug", register: registerDebugHandlers },
 ];

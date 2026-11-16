@@ -5,6 +5,7 @@
 // =====================================================================
 import { MAX_IDS_PER_REQUEST, type DeckType, type Move } from "../../../shared/protocol";
 import type { Router } from "../router";
+import { applyPreset } from "../presets";
 import { idList, isFiniteNum, isId } from "../util";
 
 export function registerSandboxHandlers(r: Router) {
@@ -40,12 +41,12 @@ export function registerSandboxHandlers(r: Router) {
   r.on("obj:flip", (c, p) => {
     const list = ids(p);
     if (!list) return "잘못된 요청이에요";
-    c.room.flip(c.player.id, list);
+    return c.room.flip(c.player.id, list) ?? undefined;
   });
   r.on("obj:rotate", (c, p) => {
     const list = ids(p);
     if (!list) return "잘못된 요청이에요";
-    if (!c.room.rotate(c.player.id, list, p.delta as number)) return "회전 값이 올바르지 않아요";
+    return c.room.rotate(c.player.id, list, p.delta as number) ?? undefined;
   });
   r.on("obj:toTop", (c, p) => {
     const list = ids(p);
@@ -66,6 +67,15 @@ export function registerSandboxHandlers(r: Router) {
     const list = ids(p);
     if (!list) return "잘못된 요청이에요";
     return c.room.remove(c.player.id, list) ?? undefined;
+  });
+  r.on("obj:pin", (c, p) => {
+    const list = ids(p);
+    if (!list || typeof p.pinned !== "boolean") return "잘못된 요청이에요";
+    return c.room.setPinned(c.player.id, list, p.pinned) ?? undefined;
+  });
+  r.on("obj:peek", (c, p) => {
+    if (!isId(p.id)) return "잘못된 요청이에요";
+    return c.room.peek(c.player, p.id) ?? undefined;
   });
 
   // ---------------- 더미 ----------------
@@ -114,10 +124,11 @@ export function registerSandboxHandlers(r: Router) {
   });
 
   // ---------------- 방장 ----------------
-  r.hostOnly("host:reset", (c) => c.room.reset());
+  // 초기화 = 지금 선택된 게임을 처음 상태로 다시 준비
+  r.hostOnly("host:reset", (c) => applyPreset(c.room, c.room.preset, c.player.nickname) ?? undefined);
   r.hostOnly("host:gather", (c) => c.room.gather());
   r.hostOnly("host:newDeck", (c, p) => {
-    const deck: DeckType = p.deck === "amumal" ? "amumal" : "standard54";
-    c.room.newDeck(deck);
+    const deck: DeckType = p.deck === "uno108" || p.deck === "propose" || p.deck === "cockroach" ? p.deck : "standard54";
+    return c.room.newDeck(deck) ?? undefined;
   });
 }

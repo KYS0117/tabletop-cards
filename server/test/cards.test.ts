@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { deckFaces, faceLabel, parseFace, standard54 } from "../../shared/cards";
+import { faceLabel, parseFace, standard54, uno108 } from "../../shared/cards";
 
 test("트럼프 54장: 중복 없음, 조커 2장 포함", () => {
   const faces = standard54();
@@ -17,9 +17,19 @@ test("앞면 문자열 해석", () => {
   assert.equal(faceLabel("S-A"), "♠A");
 });
 
-test("단어 카드 덱은 글자 카드로 구성", () => {
-  const { faces, back } = deckFaces("amumal");
-  assert.ok(faces.length > 10);
-  assert.ok(faces.every((f) => f.startsWith("T:")));
-  assert.equal(back, "amumal");
+test("우노 방식 108장 구성", () => {
+  const f = uno108();
+  assert.equal(f.length, 108);
+  assert.equal(f.filter((x) => x.startsWith("U:W-")).length, 8);
+  assert.equal(f.filter((x) => x === "U:R-0").length, 1);
+  assert.equal(f.filter((x) => x === "U:B-7").length, 2);
+  assert.equal(f.filter((x) => x === "U:G-D2").length, 2);
+  assert.ok(f.every((x) => parseFace(x).type === "uno"));
+});
+
+test("이미지 카드 경로는 안전한 이름만 허용", () => {
+  assert.deepEqual(parseFace("IMG:propose/023.webp"), { type: "image", src: "/decks/propose/023.webp" });
+  assert.equal(parseFace("IMG:../etc/passwd.png").type, "unknown");
+  assert.equal(parseFace("IMG:propose/a b.png").type, "unknown");
+  assert.equal(parseFace("IMG:propose/x.svg").type, "unknown");
 });

@@ -18,6 +18,7 @@ import { createReadStream, existsSync, statSync } from "node:fs";
 import { extname, join, normalize, resolve, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { Server } from "socket.io";
+import { resolveDeckFile } from "./decks";
 import { metricsEnabled, snapshot } from "./metrics";
 import { RoomManager } from "./rooms";
 
@@ -36,6 +37,8 @@ const MIME: Record<string, string> = {
   ".svg": "image/svg+xml",
   ".png": "image/png",
   ".jpg": "image/jpeg",
+  ".jpeg": "image/jpeg",
+  ".webp": "image/webp",
   ".ico": "image/x-icon",
   ".json": "application/json",
   ".webmanifest": "application/manifest+json",
@@ -53,6 +56,18 @@ function serveStatic(req: IncomingMessage, res: ServerResponse) {
     // ENABLE_METRICS=1 일 때만 (숫자 통계만 있고 게임 내용은 없음)
     res.writeHead(metricsEnabled ? 200 : 404, { "content-type": "application/json; charset=utf-8", "cache-control": "no-store" });
     res.end(metricsEnabled ? JSON.stringify(snapshot(manager.counts()), null, 2) : '{"error":"ENABLE_METRICS=1 로 서버를 실행하면 볼 수 있어요"}');
+    return;
+  }
+  if (url.pathname.startsWith("/decks/")) {
+    // 이미지 카드 그림 (decks/ 폴더). 뒷면으로 놓인 카드는 어떤 그림인지 전송되지 않으므로 그림 파일 자체는 공개해도 안전
+    const f = resolveDeckFile(decodeURIComponent(url.pathname));
+    if (!f) {
+      res.writeHead(404);
+      res.end();
+      return;
+    }
+    res.writeHead(200, { "content-type": MIME[extname(f).toLowerCase()] || "application/octet-stream", "cache-control": "public, max-age=86400" });
+    createReadStream(f).pipe(res);
     return;
   }
   if (!existsSync(STATIC_DIR)) {

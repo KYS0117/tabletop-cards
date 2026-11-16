@@ -3,9 +3,10 @@ import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import type * as React from "react";
 import { MAX_PLAYERS, type Background } from "../../shared/protocol";
 import type { Action } from "./actions";
+import { SoundSettings } from "./gametools";
 import { act, leaveRoom } from "./net";
 import { setPrefs, usePrefs } from "./prefs";
-import { isHostMe, myId, toast, useStore } from "./store";
+import { getState, isHostMe, myId, setState, toast, useStore } from "./store";
 
 // ---------------------------------------------------------------------
 // 상단 바: 방 이름, 초대 코드/링크, 접속 인원, 설정
@@ -61,6 +62,7 @@ export function TopBar({ onSettings, onHelp, onKick }: { onSettings: () => void;
                     {p.id === me && " (나)"}
                   </span>
                   <span className="pmeta">
+                    {p.uno && <b className="uno-badge">🔔UNO</b>}
                     🂠 {p.handCount}
                     {!p.connected && " · 연결 끊김"}
                   </span>
@@ -112,6 +114,19 @@ export function BottomBar(props: {
         🂠 내 손패 {props.handCount}
         <span className="caret">{prefs.handCollapsed ? "▴" : "▾"}</span>
       </button>
+      {props.handCount > 1 && (
+        <button
+          className="tool"
+          title="같은 카드끼리 모이도록 손패 정렬"
+          onClick={() => {
+            const hand = [...getState().hand].sort((a, b) => a.face.localeCompare(b.face, "ko", { numeric: true }));
+            setState({ hand });
+            act("hand:reorder", { order: hand.map((h) => h.id) });
+          }}
+        >
+          ⇅<span className="hide-xs"> 정렬</span>
+        </button>
+      )}
       <label className="tool check" title="손패에서 테이블로 낼 때 뒷면으로 내려놓기">
         <input type="checkbox" checked={prefs.playFaceDown} onChange={(e: React.ChangeEvent<HTMLInputElement>) => setPrefs({ playFaceDown: e.target.checked })} />
         뒷면으로 내기
@@ -284,7 +299,7 @@ const BGS: { id: Background; label: string }[] = [
   { id: "wood", label: "나무" },
 ];
 
-export function SettingsModal({ onClose, askConfirm }: { onClose: () => void; askConfirm: (text: string, onOk: () => void) => void }) {
+export function SettingsModal({ onClose, askConfirm, onPickGame }: { onClose: () => void; askConfirm: (text: string, onOk: () => void) => void; onPickGame: () => void }) {
   const st = useStore();
   const prefs = usePrefs();
   const room = st.room!;
@@ -352,15 +367,29 @@ export function SettingsModal({ onClose, askConfirm }: { onClose: () => void; as
           </label>
         </section>
 
+        <section>
+          <h4>🔊 소리</h4>
+          <SoundSettings host={host} />
+        </section>
+
         {host && (
           <section>
             <h4>방장 도구</h4>
             <div className="grid2">
+              <button className="btn primary" onClick={onPickGame}>
+                🎲 게임 고르기
+              </button>
               <button className="btn" onClick={() => act("host:newDeck", { deck: "standard54" })}>
                 🂠 트럼프 54장 추가
               </button>
-              <button className="btn" onClick={() => act("host:newDeck", { deck: "amumal" })}>
-                💍 단어 카드 덱 추가
+              <button className="btn" onClick={() => act("host:newDeck", { deck: "uno108" })}>
+                🌈 우노 덱 추가
+              </button>
+              <button className="btn" onClick={() => act("host:newDeck", { deck: "propose" })}>
+                💍 프로포즈 덱 추가
+              </button>
+              <button className="btn" onClick={() => act("host:newDeck", { deck: "cockroach" })}>
+                🪳 바퀴벌레 포커 덱 추가
               </button>
               <button className="btn" onClick={() => askConfirm("테이블의 모든 카드(더미 포함)를 한 더미로 모을까요? 손패는 그대로예요.", () => act("host:gather", {}))}>
                 🧺 모든 카드 모으기
@@ -410,13 +439,14 @@ export function HelpModal({ onClose }: { onClose: () => void }) {
             <h4>🖱 PC</h4>
             <ul>
               <li><b>왼쪽 드래그</b> 카드 집어서 옮기기</li>
-              <li><b>더미 드래그</b> 맨 위 1장 뽑기 · <b>⠿ 손잡이</b>를 끌면 더미 전체 이동</li>
+              <li><b>더미 드래그</b> 맨 위 1장 뽑기 · <b>⠿ 손잡이</b>를 끌거나 <b>더미를 꾹 누른 채</b> 끌면 더미 전체 이동</li>
               <li><b>더블클릭</b> 뒤집기 (F 키도 가능)</li>
               <li><b>Q / E</b> 15° 회전 (들고 있는 중에도 가능)</li>
               <li><b>Shift+클릭</b> 여러 장 선택 · <b>Shift+빈 곳 드래그</b> 영역 선택</li>
               <li><b>빈 곳 드래그</b> 화면 이동 · <b>휠</b> 확대/축소</li>
               <li><b>우클릭</b> 메뉴 (섞기, 뽑기, 펼치기, 묶기…)</li>
               <li><b>Delete</b> 삭제 (방장 또는 허용된 경우)</li>
+              <li><b>🔒 잠그기</b> 우클릭 메뉴 → 잠그면 움직이지 않아요 (풀기는 잠근 사람·방장)</li>
             </ul>
           </div>
           <div>
@@ -424,7 +454,7 @@ export function HelpModal({ onClose }: { onClose: () => void }) {
             <ul>
               <li><b>한 손가락 드래그</b> 카드 이동 · 빈 곳이면 화면 이동</li>
               <li><b>더블탭</b> 뒤집기</li>
-              <li><b>길게 누르기</b> 메뉴</li>
+              <li><b>길게 누르기</b> 메뉴 · <b>더미를 꾹 누른 채 끌기</b> 더미 전체 이동</li>
               <li><b>두 손가락</b> 확대/축소 + 화면 이동</li>
               <li><b>카드를 탭</b>하면 아래에 회전·뒤집기 버튼이 나와요</li>
               <li><b>☑ 다중 선택</b>을 켜면 탭으로 여러 장 선택, 빈 곳 드래그로 영역 선택</li>
@@ -438,6 +468,16 @@ export function HelpModal({ onClose }: { onClose: () => void }) {
           <li>손패 카드를 <b>위로 끌어 올리면</b> 테이블에 내려놓아져요. "뒷면으로 내기"를 켜면 뒷면으로 놓여요.</li>
           <li>손패 안에서 좌우로 끌면 순서가 바뀌어요.</li>
           <li>카드를 <b>더미 위에 놓으면</b> 더미에 합쳐져요. 그냥 겹쳐 두려면 더미가 아닌 곳에 놓으세요.</li>
+        </ul>
+        <h4>🎲 게임 도구 (화면 위)</h4>
+        <ul>
+          <li><b>게임 이름</b>(방장): 프로포즈 / 우노 방식 / 자유 테이블 중 골라 자동으로 준비</li>
+          <li><b>⏱ 타이머</b>: 누구나 시간 설정·시작·멈춤. 모두에게 같은 시간이 보여요</li>
+          <li><b>💍 반지</b>: 마음에 든 프로포즈를 한 사람에게 ＋. 3개 모으면 승리!</li>
+          <li><b>✍ 카드 쓰기</b>: 직접 쓴 카드를 덱에 섞거나 손패로</li>
+          <li><b>🔊 소리</b>: 전체·배경음악·효과음·알림 볼륨 (방장은 배경음악 곡 선택)</li>
+          <li><b>🔔 우노!</b>: 우노 게임에서 손패가 1~2장이면 오른쪽 아래에 버튼이 나와요</li>
+          <li><b>📣 선언 · 👁 몰래 보기</b>: 바퀴벌레 포커에서 뒷면 카드를 내고 선언, 받은 사람은 진짜/거짓말 대답 또는 몰래 보고 넘기기</li>
         </ul>
         <button className="btn primary wide" onClick={onClose}>
           시작하기
