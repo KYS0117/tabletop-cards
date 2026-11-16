@@ -47,7 +47,9 @@ interface Cam {
 const DRAG_SEND_MS = 40; // 드래그 위치 전송 간격 (초당 약 25회)
 const CURSOR_SEND_MS = 90;
 const LONG_PRESS_MS = 520;
-const DECK_HOLD_MS = 400; // 더미를 이만큼 누르고 있으면 "더미 전체 들기"
+const DECK_HOLD_MS = 400;
+const MERGE_CARD_TOL = 0.3; // 카드끼리 합쳐지는 거리 (카드 크기의 30% 이내로 맞춰 놓으면)
+const FLIP_HALF_MS = 140; // 뒤집기 애니메이션 절반 시간 // 더미를 이만큼 누르고 있으면 "더미 전체 들기"
 
 /** 카드/더미의 실제 크기 (세로형/가로형) */
 const sizeOf = (o: { shape?: PubObj["shape"] } | undefined, scale = getState().room?.settings.cardScale ?? 1) => cardSize(scale, o?.shape);
@@ -268,11 +270,13 @@ export function Table() {
     let best: string | null = null;
     let bestD = Infinity;
     for (const o of getState().objects.values()) {
-      if (o.kind !== "stack" || ids.includes(o.id) || lockedByOther(o)) continue;
+      if (ids.includes(o.id) || lockedByOther(o)) continue;
       const { w, h } = sizeOf(o);
       const dx = Math.abs(o.x - px);
       const dy = Math.abs(o.y - py);
-      if (dx < w * 0.5 && dy < h * 0.5 && dx + dy < bestD) {
+      // 더미: 절반쯤 겹치면 합치기 / 낱장 카드: 거의 딱 맞춰 놓았을 때만 합쳐 새 더미 (살짝 겹쳐 두는 것과 구분)
+      const tol = o.kind === "stack" ? 0.5 : MERGE_CARD_TOL;
+      if (dx < w * tol && dy < h * tol && dx + dy < bestD) {
         best = o.id;
         bestD = dx + dy;
       }
@@ -1034,7 +1038,7 @@ export function Table() {
         onContextMenu={onContextMenu}
         onDragStart={(e: React.DragEvent) => e.preventDefault()}
       >
-        <div className="world" ref={worldRef} style={{ "--cs": scale } as React.CSSProperties}>
+        <div className={`world ${mergeTarget ? "merging" : ""}`} ref={worldRef} style={{ "--cs": scale } as React.CSSProperties}>
           <div className="tabletop" style={{ width: TABLE_W, height: TABLE_H }} />
           {objects.map((o) => (
             <ObjView
@@ -1225,6 +1229,22 @@ const ObjView = memo(function ObjView({ o, me, selected, dragging, merge, lifted
     anim.register(o.id, el);
     return () => anim.unregister(o.id, el);
   }, [o.id]);
+  // 뒤집기 애니메이션: 앞뒤가 바뀌면 옛 면으로 90°까지 돌고 → 새 면으로 바꿔 나머지 90° (모든 사람 화면에서)
+  const [flip, setFlip] = useState<0 | 1 | 2>(0);
+  const prevObj = useRef(o);
+  const oldObj = useRef<PubObj | null>(null);
+  const flipTimers = useRef<number[]>([]);
+  useLayoutEffect(() => {
+    const prev = prevObj.current;
+    prevObj.current = o;
+    if (prev.faceUp === o.faceUp || prev.id !== o.id || !getPrefs().animations) return;
+    flipTimers.current.forEach(clearTimeout);
+    oldObj.current = prev;
+    setFlip(1);
+    flipTimers.current = [window.setTimeout(() => setFlip(2), FLIP_HALF_MS), window.setTimeout(() => setFlip(0), FLIP_HALF_MS * 2)];
+  }, [o]);
+  useEffect(() => () => flipTimers.current.forEach(clearTimeout), []);
+  const disp = flip === 1 && oldObj.current ? oldObj.current : o; // 첫 절반은 옛 면
   const holder = o.lockedBy && o.lockedBy !== me ? playerById(o.lockedBy) : undefined;
   const cls = ["obj", `k-${o.kind}`]; // ("card" 는 카드 그림 클래스와 겹치므로 k- 접두어 사용)
   if (selected) cls.push("sel");
@@ -1239,13 +1259,13 @@ const ObjView = memo(function ObjView({ o, me, selected, dragging, merge, lifted
   const thick = o.kind === "stack" ? Math.min(6, Math.ceil(o.count / 9)) : 0;
   return (
     <div ref={ref} className={cls.join(" ")} data-oid={o.id} style={{ zIndex: dragging ? 500000 + o.z : o.z }}>
-      <div className={`lift thick-${thick}`}>
-        {o.kind === "card" ? (
-          <CardFace face={o.face} back={o.back} />
+      <div className={`lift thick-${thick} ${flip === 1 ? "flip-a" : flip === 2 ? "flip-b" : ""}`}>
+        {disp.kind === "card" ? (
+          <CardFace face={disp.face} back={disp.back} />
         ) : empty ? (
           <div className="pile-empty">{o.label ?? "빈 자리"}</div>
         ) : (
-          <CardFace face={o.faceUp ? o.top : null} back={o.back} />
+          <CardFace face={disp.faceUp ? disp.top : null} back={disp.back} />
         )}
       </div>
       {o.kind === "stack" && o.label && !empty && <div className="pile-label">{o.label}</div>}

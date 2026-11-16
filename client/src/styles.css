@@ -566,3 +566,17 @@ button { cursor: pointer; touch-action: manipulation; }
   .uno-btn { padding: 8px 14px; font-size: 16px; }
   .peek-card { --cs: 1.2 !important; }
 }
+
+/* ------------------------------------------------------------ 뒤집기 애니메이션 (옛 면 0→90°, 새 면 -90→0°) */
+.obj .lift.flip-a { animation: flipA 140ms ease-in forwards; }
+.obj .lift.flip-b { animation: flipB 140ms ease-out; }
+@keyframes flipA {
+  from { transform: perspective(700px) rotateY(0deg) scale(1); }
+  to { transform: perspective(700px) rotateY(90deg) scale(1.1) translateY(-6px); }
+}
+@keyframes flipB {
+  from { transform: perspective(700px) rotateY(-90deg) scale(1.1) translateY(-6px); }
+  to { transform: perspective(700px) rotateY(0deg) scale(1); }
+}
+/* 놓으면 합쳐질 때: 들고 있는 카드에도 초록 테두리 (딱 맞추면 아래 카드가 가려지므로) */
+.shadows .world.merging .obj.dragging .lift, .world.merging .obj.dragging .lift { box-shadow: 0 0 0 calc(4px * var(--cs)) #7cf0b2, 0 0 22px #7cf0b2, 0 14px 24px rgba(0, 0, 0, 0.4); }
