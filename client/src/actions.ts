@@ -31,7 +31,8 @@ export interface ActionCtx {
 export function buildActions(ctx: ActionCtx): Action[] {
   const objs = ctx.ids.map((id) => getState().objects.get(id)).filter((o): o is PubObj => !!o);
   const me = myId();
-  const usable = objs.filter((o) => !o.lockedBy || o.lockedBy === me);
+  // 게임이 관리하는 카드(우노 덱 등)는 손으로 조작하지 않음
+  const usable = objs.filter((o) => !o.system && (!o.lockedBy || o.lockedBy === me));
   if (!usable.length) return [];
   const ids = usable.map((o) => o.id);
   // 🔒 잠긴 것은 옮기기·뒤집기·회전·삭제·손패로 가져오기 대상에서 뺌

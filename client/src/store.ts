@@ -33,6 +33,14 @@ export interface ClientState {
   banner: { text: string; kind: string } | null;
   /** 👁 몰래 본 카드 (나에게만 보임) */
   peek: { id: string; face: string; back: string; shape?: "P" | "L" } | null;
+  /** 규칙 게임 창: 우노 색 고르기 / 바퀴벌레 포커 넘기기 */
+  gameModal: { kind: "color"; cardId: string } | { kind: "roachGive"; cardId: string } | null;
+  /** 우노: 이번 차례에 뽑은 카드 (그 카드만 낼 수 있음) */
+  drawnCardId: string | null;
+  /** 서버 버전이 화면 버전과 다를 때 (배포가 덜 됨) */
+  serverVersion: string | null;
+  /** 우노 특수 카드 연출 (잠깐 보였다 사라짐) */
+  unoFx: (import("../../shared/protocol").UnoFx & { key: number }) | null;
 }
 
 let state: ClientState = {
@@ -46,6 +54,10 @@ let state: ClientState = {
   joining: false,
   banner: null,
   peek: null,
+  gameModal: null,
+  drawnCardId: null,
+  serverVersion: null,
+  unoFx: null,
 };
 
 /** 서버 시계 - 내 시계 (타이머를 모두 같은 시간으로 보여 주기 위함) */

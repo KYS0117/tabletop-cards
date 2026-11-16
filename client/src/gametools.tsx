@@ -1,12 +1,12 @@
 // =====================================================================
-// 게임 도구: 게임 선택 · 공용 타이머 · 반지(점수)판 · 직접 쓰는 카드 · 소리 · 승리 배너
-// 규칙을 강제하지 않는 자유 진행이라 누구나 타이머와 반지를 조작할 수 있어요.
-// (게임 선택·배경음악 곡 선택만 방장)
+// 게임 도구: 게임 선택 · 공용 타이머 · 반지판 · 직접 쓰는 카드 · 소리 · 승리 배너 · 몰래 보기
+// 타이머는 누구나, 게임 선택·배경음악 곡은 방장, 반지는 프로포즈 받는 사람만 (방장은 고치기 가능)
 // =====================================================================
 import { useEffect, useRef, useState } from "react";
 import type * as React from "react";
-import { CREATURES, CUSTOM_LINES_MAX, CUSTOM_TEXT_MAX, TIMER_MAX_SEC, type BgmTrack, type CreatureId, type PresetId } from "../../shared/protocol";
+import { CUSTOM_LINES_MAX, CUSTOM_TEXT_MAX, TIMER_MAX_SEC, type BgmTrack, type PresetId } from "../../shared/protocol";
 import { CardFace } from "./CardFace";
+import { peekHandledByGame } from "./games";
 import { act, request } from "./net";
 import { setPrefs, usePrefs } from "./prefs";
 import * as sound from "./sound";
@@ -17,16 +17,16 @@ export const GAMES: { id: PresetId; icon: string; name: string; desc: string }[]
     id: "propose",
     icon: "💍",
     name: "방금 떠올린 프로포즈의 말을 너에게 바칠게",
-    desc: "모두 기본 카드 6장 + 덱에서 6장. 카드를 순서대로 내서 프로포즈하고, 받는 사람이 가장 마음에 든 사람에게 반지를 줘요. 반지 3개면 승리!",
+    desc: "라운드마다 한 명이 프로포즈를 받아요. 나머지는 기본 카드 6장 + 단어 카드 6장으로 문장을 만들어 프로포즈하고, 받는 사람만 가장 마음에 든 한 명에게 반지를 줘요. 반지 3개면 승리! (✍ 직접 쓴 카드 가능)",
   },
-  { id: "uno", icon: "🌈", name: "우노 방식 컬러 카드", desc: "108장 컬러 카드 덱, 한 사람당 7장, 버린 카드 더미에 첫 카드 공개. 카드가 1~2장 남으면 🔔 우노! 버튼이 나와요." },
+  { id: "uno", icon: "🌈", name: "우노 (규칙 자동)", desc: "차례·낼 수 있는 카드·스킵·리버스·+2·+4·색 고르기·우노 안 외치면 잡기까지 자동이에요. 손패를 다 내면 승리!" },
   {
     id: "cockroach",
     icon: "🪳",
-    name: "바퀴벌레 포커",
-    desc: "벌레 8종×8장 64장을 모두 나눠 가져요. 카드를 뒷면으로 내고 📣 선언 → 받은 사람이 진짜/거짓말을 맞히거나 👁 몰래 보고 넘겨요. 같은 벌레 4장을 받으면 패배!",
+    name: "바퀴벌레 포커 (규칙 자동)",
+    desc: "64장을 모두 나눠 갖고, 차례인 사람이 카드를 뒷면으로 넘기며 \"이건 ○○야!\" 선언. 받은 사람은 진짜/거짓말을 맞히거나 몰래 보고 다른 사람에게 넘겨요. 같은 벌레 벌칙 카드 4장이면 패배!",
   },
-  { id: "free", icon: "🂠", name: "자유 테이블 (트럼프)", desc: "트럼프 54장 덱 하나만 놓고 마음대로 놀아요." },
+  { id: "free", icon: "🂠", name: "자유 테이블 (트럼프)", desc: "트럼프 54장 덱 하나만 놓고 마음대로 놀아요. 규칙 없음." },
 ];
 
 const gameOf = (id: PresetId | undefined) => GAMES.find((g) => g.id === id) ?? GAMES.find((g) => g.id === "free")!;
@@ -57,7 +57,7 @@ function useRemaining() {
 // ---------------------------------------------------------------------
 // 화면 위쪽 게임 바
 // ---------------------------------------------------------------------
-type Pop = "timer" | "score" | "sound" | "claim" | null;
+type Pop = "timer" | "score" | "sound" | null;
 
 export function GameBar({ onPickGame, onCustom }: { onPickGame: () => void; onCustom: () => void }) {
   const st = useStore();
@@ -120,18 +120,11 @@ export function GameBar({ onPickGame, onCustom }: { onPickGame: () => void; onCu
         </div>
       )}
 
-      {room.preset === "cockroach" && (
-        <div className="gpop-wrap">
-          <button className="gchip claim" onClick={() => setPop(pop === "claim" ? null : "claim")} title="선언하기">
-            📣<span className="hide-xs"> 선언</span>
-          </button>
-          {pop === "claim" && <ClaimPop onClose={() => setPop(null)} />}
-        </div>
+      {room.preset === "propose" && (
+        <button className="gchip" onClick={onCustom} title="직접 쓰는 카드 만들기 (프로포즈 게임)">
+          ✍<span className="hide-xs"> 카드 쓰기</span>
+        </button>
       )}
-
-      <button className="gchip" onClick={onCustom} title="직접 쓰는 카드 만들기">
-        ✍<span className="hide-xs"> 카드 쓰기</span>
-      </button>
 
       <div className="gpop-wrap">
         <button
@@ -226,17 +219,27 @@ function ScorePop({ onClose }: { onClose: () => void }) {
   const room = useStore().room!;
   const sc = room.score!;
   const me = myId();
+  const host = isHostMe();
+  const pg = room.game?.kind === "propose" ? room.game : null;
+  const receiver = pg ? room.players.find((p) => p.id === pg.receiver) : undefined;
+  const iAmReceiver = !!pg && pg.receiver === me;
   const players = [...room.players].sort((a, b) => b.score - a.score);
   return (
     <div className="gpop" onPointerDown={stop}>
       <div className="pop-title">
         {sc.icon} {sc.label} — {sc.goal}개 모으면 승리
       </div>
-      <p className="muted small">프로포즈를 받은 사람이 가장 마음에 든 사람에게 ＋를 눌러 주세요.</p>
+      {pg && (
+        <p className="muted small">
+          이번 라운드 받는 사람: <b>{receiver?.nickname ?? "?"}</b>
+          {iAmReceiver ? (pg.given ? " · 반지를 줬어요" : " · 가장 마음에 든 프로포즈에 반지를 주세요 (한 번만)") : " · 반지는 받는 사람만 줄 수 있어요"}
+        </p>
+      )}
       {players.map((p) => (
-        <div key={p.id} className={`srow ${p.connected ? "" : "off"} ${p.score >= sc.goal ? "won" : ""}`}>
+        <div key={p.id} className={`srow ${p.connected ? "" : "off"} ${p.score >= sc.goal ? "won" : ""} ${pg?.given === p.id ? "got" : ""}`}>
           <i className="pdot" style={{ background: p.color }} />
           <span className="pname">
+            {pg?.receiver === p.id && "💌 "}
             {p.nickname}
             {p.id === me && " (나)"}
           </span>
@@ -247,14 +250,24 @@ function ScorePop({ onClose }: { onClose: () => void }) {
               </span>
             ))}
           </span>
-          <button className="mini" onClick={() => act("score:add", { playerId: p.id, delta: -1 })} disabled={p.score <= 0} title="하나 빼기">
-            −
-          </button>
-          <button className="mini give" onClick={() => act("score:add", { playerId: p.id, delta: 1 })} title={`${sc.label} 주기`}>
-            ＋{sc.icon}
-          </button>
+          {iAmReceiver && !pg!.given && p.id !== me && (
+            <button className="mini give" onClick={() => act("propose:ring", { to: p.id })} title={`${p.nickname}님에게 반지 주기`}>
+              ＋{sc.icon} 주기
+            </button>
+          )}
+          {host && (
+            <>
+              <button className="mini" onClick={() => act("score:add", { playerId: p.id, delta: -1 })} disabled={p.score <= 0} title="방장: 하나 빼기 (실수 바로잡기)">
+                −
+              </button>
+              <button className="mini" onClick={() => act("score:add", { playerId: p.id, delta: 1 })} title="방장: 하나 더하기 (실수 바로잡기)">
+                ＋
+              </button>
+            </>
+          )}
         </div>
       ))}
+      {host && <p className="muted small">방장은 − / ＋ 로 실수를 바로잡을 수 있어요.</p>}
       <button className="btn ghost wide" onClick={onClose}>
         닫기
       </button>
@@ -465,129 +478,11 @@ export function Banner() {
 }
 
 // ---------------------------------------------------------------------
-// 🔔 우노! 버튼 (우노 게임에서 내 손패가 1~2장일 때)
-// ---------------------------------------------------------------------
-export function UnoButton() {
-  const st = useStore();
-  const room = st.room!;
-  const n = st.hand.length;
-  if (room.preset !== "uno" || n === 0 || n > 2) return null;
-  const called = !!room.players.find((p) => p.id === myId())?.uno;
-  return (
-    <button
-      className={`uno-btn ${called ? "called" : ""} ${n === 1 ? "last" : ""}`}
-      onPointerDown={stop}
-      onClick={() =>
-        request("uno:call", {}).then((r) => {
-          if (!r.ok) toast(r.error, "warn");
-        })
-      }
-      title="우노! 외치기"
-    >
-      🔔 우노!{called && <small>외쳤어요</small>}
-    </button>
-  );
-}
-
-// ---------------------------------------------------------------------
-// 📣 바퀴벌레 포커: 선언 창 / 현재 선언 표시 / 대답
-// ---------------------------------------------------------------------
-const creatureOf = (id: CreatureId) => CREATURES.find((c) => c.id === id)!;
-
-function ClaimPop({ onClose }: { onClose: () => void }) {
-  const room = useStore().room!;
-  const me = myId();
-  const others = room.players.filter((p) => p.id !== me && p.connected);
-  // 방금 나에게 선언한 사람에게 되돌려주기는 원래 규칙상 안 되지만, 자유 진행이라 막지 않음
-  const [to, setTo] = useState<string | null>(others.length === 1 ? others[0].id : null);
-  const [creature, setCreature] = useState<CreatureId | null>(null);
-  const send = () => {
-    if (!to || !creature) return;
-    request("claim:say", { to, creature }).then((r) => {
-      if (!r.ok) toast(r.error, "warn");
-      else onClose();
-    });
-  };
-  return (
-    <div className="gpop" onPointerDown={stop}>
-      <div className="pop-title">📣 선언하기</div>
-      <p className="muted small">카드를 뒷면으로 상대 앞에 내고, 어떤 벌레라고 말할지 고르세요. 진짜든 거짓말이든 자유!</p>
-      <div className="pop-sub">누구에게?</div>
-      <div className="seg wrap">
-        {others.length === 0 && <span className="muted small">다른 사람이 없어요</span>}
-        {others.map((p) => (
-          <button key={p.id} className={to === p.id ? "on" : ""} onClick={() => setTo(p.id)}>
-            <i className="pdot" style={{ background: p.color, display: "inline-block", marginRight: 6 }} />
-            {p.nickname}
-          </button>
-        ))}
-      </div>
-      <div className="pop-sub">"이건 ○○야!"</div>
-      <div className="creature-grid">
-        {CREATURES.map((c) => (
-          <button key={c.id} className={creature === c.id ? "on" : ""} onClick={() => setCreature(c.id)}>
-            <span>{c.icon}</span>
-            {c.name}
-          </button>
-        ))}
-      </div>
-      <div className="row">
-        <button className="btn ghost" onClick={onClose}>
-          닫기
-        </button>
-        <button className="btn primary" disabled={!to || !creature} onClick={send}>
-          선언하기
-        </button>
-      </div>
-    </div>
-  );
-}
-
-/** 화면 위쪽: 지금 선언 + (받은 사람이면) 대답 버튼 */
-export function ClaimPanel() {
-  const room = useStore().room!;
-  const cl = room.claim;
-  if (room.preset !== "cockroach" || !cl) return null;
-  const by = room.players.find((p) => p.id === cl.by);
-  const to = room.players.find((p) => p.id === cl.to);
-  const c = creatureOf(cl.creature);
-  const mine = cl.to === myId();
-  const answer = (a: "yes" | "no") =>
-    request("claim:answer", { answer: a }).then((r) => {
-      if (!r.ok) toast(r.error, "warn");
-    });
-  return (
-    <div className={`claim-panel ${mine && !cl.answer ? "mine" : ""}`} onPointerDown={stop}>
-      <span className="cl-who">
-        <b style={{ color: by?.color }}>{by?.nickname ?? "?"}</b> → <b style={{ color: to?.color }}>{mine ? "나" : (to?.nickname ?? "?")}</b>
-      </span>
-      <span className="cl-what">
-        "{c.icon} {c.name}야!"
-      </span>
-      {cl.answer ? (
-        <span className={`cl-ans ${cl.answer}`}>{cl.answer === "yes" ? "🙆 진짜!" : "🙅 거짓말!"}</span>
-      ) : mine ? (
-        <>
-          <button className="mini cl-yes" onClick={() => answer("yes")}>
-            🙆 진짜!
-          </button>
-          <button className="mini cl-no" onClick={() => answer("no")}>
-            🙅 거짓말!
-          </button>
-        </>
-      ) : (
-        <span className="muted small">대답 기다리는 중…</span>
-      )}
-    </div>
-  );
-}
-
-// ---------------------------------------------------------------------
 // 👁 몰래 본 카드 (나에게만)
 // ---------------------------------------------------------------------
 export function PeekModal() {
   const pk = useStore().peek;
-  if (!pk) return null;
+  if (!pk || peekHandledByGame()) return null; // 바퀴벌레 포커는 넘기기 창에서 보여 줌
   const close = () => setState({ peek: null });
   return (
     <div className="modal-bg" onPointerDown={close}>

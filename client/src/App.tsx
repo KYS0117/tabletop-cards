@@ -1,6 +1,7 @@
 import { Suspense, useState } from "react";
 import type * as React from "react";
 import { MAX_PLAYERS } from "../../shared/protocol";
+import { APP_VERSION } from "../../shared/version";
 import { modeFor } from "./modes/registry";
 import { createRoom, joinRoom } from "./net";
 import { PerfOverlay } from "./PerfOverlay";
@@ -119,6 +120,7 @@ function Lobby() {
           </div>
         </div>
         <p className="muted small">최대 {MAX_PLAYERS}명 · PC, 안드로이드, 아이폰 브라우저에서 함께 할 수 있어요 · 게임방은 서버가 재시작되면 사라져요</p>
+        <p className="muted small version-line">버전 {APP_VERSION}</p>
       </div>
       <Toasts />
     </div>

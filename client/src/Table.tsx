@@ -8,6 +8,8 @@
 // [모바일] 한 손가락 드래그: 카드 이동(빈 곳이면 화면 이동) · 더블탭: 뒤집기 · 길게 누르기: 메뉴
 //        더미를 꾹 누르면 들리고 → 그대로 끌면 더미 전체 이동, 움직이지 않고 떼면 메뉴
 // [공통] 🔒 잠긴 카드/더미는 끌면 화면이 이동 (잠긴 더미에서 한 장 뽑기는 가능)
+//        🫨 카드/더미를 잡고 좌우(또는 위아래)로 빠르게 흔들면 주변 카드가 모여 한 더미가 됨
+//        규칙 자동 게임(우노·바퀴벌레 포커): 손패 카드를 탭하거나 위로 끌어 내기, 게임 덱을 탭해 뽑기
 //        두 손가락: 확대/축소 + 화면 이동 · "다중 선택" 모드: 탭으로 여러 장 선택, 빈 곳 드래그로 영역 선택
 //
 // 모든 위치는 테이블 좌표(월드 좌표)로 서버에 보내므로 화면 크기·확대 배율과 상관없이 모두에게 같은 자리에 보입니다.
@@ -18,11 +20,13 @@ import { cardSize, TABLE_H, TABLE_W, type HandCard, type Move, type PubCard, typ
 import * as anim from "./anim";
 import { buildActions, type Action } from "./actions";
 import { CardFace } from "./CardFace";
-import { Banner, ClaimPanel, CustomCardModal, GameBar, GameSelectModal, PeekModal, UnoButton } from "./gametools";
+import { deckTap, GameButtons, GameModals, GamePanel, handTap, UnoFxLayer, unoPlayable } from "./games";
+import { Banner, CustomCardModal, GameBar, GameSelectModal, PeekModal } from "./gametools";
 import { act, ensureObject, onCursor, request, sendVolatile } from "./net";
 import { count, recordTableRender } from "./perf";
 import { getPrefs, setPrefs, usePrefs } from "./prefs";
 import * as sound from "./sound";
+import { APP_VERSION } from "../../shared/version";
 import { getState, myId, playerById, setState, toast, useStore } from "./store";
 import { ActionBar, BottomBar, ConfirmModal, ContextMenu, HelpModal, PromptModal, SettingsModal, Toasts, TopBar } from "./ui";
 
@@ -49,7 +53,18 @@ const CURSOR_SEND_MS = 90;
 const LONG_PRESS_MS = 520;
 const DECK_HOLD_MS = 400;
 const MERGE_CARD_TOL = 0.3; // 카드끼리 합쳐지는 거리 (카드 크기의 30% 이내로 맞춰 놓으면)
-const FLIP_HALF_MS = 140; // 뒤집기 애니메이션 절반 시간 // 더미를 이만큼 누르고 있으면 "더미 전체 들기"
+const FLIP_HALF_MS = 140; // 뒤집기 애니메이션 절반 시간
+// 흔들기 감지: 짧은 시간 안에 방향이 여러 번 바뀌면 "흔들기"
+const SHAKE_MIN_STEP = 10; // 화면 px — 이보다 작게 움직이면 방향 판단 안 함
+const SHAKE_WINDOW_MS = 800;
+const SHAKE_REVERSALS = 3; // 0.8초 안에 방향이 3번 바뀌면 (왔다 갔다 한 번 반)
+const SHAKE_COOLDOWN_MS = 900;
+
+/** 손으로 카드를 내기·가져오기가 막힌 게임 (규칙 자동: 우노·바퀴벌레 포커) */
+const rulesGame = () => {
+  const g = getState().room?.game;
+  return !!g && g.kind !== "propose";
+}; // 더미를 이만큼 누르고 있으면 "더미 전체 들기"
 
 /** 카드/더미의 실제 크기 (세로형/가로형) */
 const sizeOf = (o: { shape?: PubObj["shape"] } | undefined, scale = getState().room?.settings.cardScale ?? 1) => cardSize(scale, o?.shape);
@@ -79,6 +94,8 @@ export function Table() {
   const lastTap = useRef<{ id: string; t: number; x: number; y: number } | null>(null);
   const lastCursor = useRef(0);
   const lastPinToast = useRef(0);
+  const shakeVis = useRef(0);
+  const shake = useRef({ x: 0, y: 0, dx: 0, dy: 0, flips: [] as number[], last: 0, busy: false });
   const fitted = useRef(false);
 
   // 개발자 성능 창: 테이블 렌더+커밋에 걸린 시간 기록 (의존성 없음 = 매 커밋마다 실행)
@@ -326,7 +343,7 @@ export function Table() {
                 setSelection(new Set([next.id]));
               }
             : undefined;
-        const actions = buildActions({ ids, openPrompt, clearSelection: () => setSelection(new Set()), selectBelow, openCustom: (stackId) => setCustom({ stackId }) });
+        const actions = buildActions({ ids, openPrompt, clearSelection: () => setSelection(new Set()), selectBelow });
         if (!actions.length) {
           toast("다른 사람이 잡고 있는 카드예요", "warn");
           return;
@@ -340,7 +357,7 @@ export function Table() {
           { key: "fitAll", label: "테이블 전체 보기", icon: "🔭", run: () => fit(true) },
         ];
         if (selRef.current.size) actions.push({ key: "clear", label: "선택 해제", icon: "✕", run: () => setSelection(new Set()) });
-        actions.push({ key: "custom", label: "직접 쓰는 카드 만들기…", icon: "✍", run: () => setCustom({}) });
+        if (getState().room?.preset === "propose") actions.push({ key: "custom", label: "직접 쓰는 카드 만들기…", icon: "✍", run: () => setCustom({}) });
         if (getState().room?.hostId === myId()) {
           actions.push(
             { key: "game", label: "게임 고르기…", icon: "🎲", run: () => setShowGame(true) },
@@ -379,6 +396,7 @@ export function Table() {
       anim.setLocal(id, p.x, p.y);
     }
     g.current = { kind: "drag", pid, ids: usable, off, primary, lastSent: 0, cx, cy };
+    shake.current = { x: cx, y: cy, dx: 0, dy: 0, flips: [], last: shake.current.last, busy: false };
     setDragging(new Set(usable));
     sound.sfx("pick");
     request<"obj:grab", { granted: string[] }>("obj:grab", { ids: usable }).then((r) => {
@@ -453,6 +471,7 @@ export function Table() {
     }
     anim.setLocal(id, x, y);
     g.current = { kind: "drag", pid: cur.pid, ids: [id], off: new Map([[id, cur.off]]), primary: id, lastSent: 0, cx: cur.cx, cy: cur.cy };
+    shake.current = { x: cur.cx, y: cur.cy, dx: 0, dy: 0, flips: [], last: shake.current.last, busy: false };
     setDragging(new Set([id]));
     setSelection(new Set([id]));
   };
@@ -511,6 +530,63 @@ export function Table() {
       mergeRef.current = mt;
       setMergeTarget(mt);
     }
+    detectShake(cx, cy);
+  };
+
+  /** 🫨 흔들기 감지 → 서버에 "주변 카드 모으기" 요청 */
+  const detectShake = (cx: number, cy: number) => {
+    const sh = shake.current;
+    const now = performance.now();
+    for (const axis of ["x", "y"] as const) {
+      const d = (axis === "x" ? cx : cy) - sh[axis];
+      if (Math.abs(d) < SHAKE_MIN_STEP) continue;
+      const dir = Math.sign(d);
+      const key = axis === "x" ? "dx" : "dy";
+      if (sh[key] && sh[key] !== dir) sh.flips.push(now);
+      sh[key] = dir;
+      sh[axis] = axis === "x" ? cx : cy;
+    }
+    sh.flips = sh.flips.filter((t) => now - t < SHAKE_WINDOW_MS);
+    // 흔드는 중이라는 표시 (카드가 덜덜)
+    if (sh.flips.length >= 1 && worldRef.current) {
+      worldRef.current.classList.add("shaking");
+      window.clearTimeout(shakeVis.current);
+      shakeVis.current = window.setTimeout(() => worldRef.current?.classList.remove("shaking"), 260);
+    }
+    if (sh.flips.length < SHAKE_REVERSALS || sh.busy || now - sh.last < SHAKE_COOLDOWN_MS) return;
+    const cur = g.current;
+    if (cur.kind !== "drag") return;
+    sh.flips = [];
+    sh.last = now;
+    sh.busy = true;
+    const oldId = cur.primary;
+    const pos = anim.shown(oldId);
+    navigator.vibrate?.(30);
+    request<"obj:shake", { id: string; count: number }>("obj:shake", { id: oldId, x: pos?.x ?? 0, y: pos?.y ?? 0 }).then((r) => {
+      sh.busy = false;
+      if (!r.ok) {
+        toast(r.error, "warn");
+        return;
+      }
+      if (!r.count) {
+        toast("🫨 주변에 모을 카드가 없어요");
+        return;
+      }
+      toast(`🫨 카드 ${r.count}장을 모았어요`);
+      const c = g.current;
+      if (c.kind !== "drag" || r.id === oldId || !c.ids.includes(oldId)) return;
+      // 낱장이 더미로 바뀌면서 새 id → 계속 끌 수 있게 바꿔 줌
+      const off = c.off.get(oldId)!;
+      c.ids = c.ids.map((id) => (id === oldId ? r.id : id));
+      c.off.delete(oldId);
+      c.off.set(r.id, off);
+      c.primary = r.id;
+      anim.clearLocal(oldId);
+      const w = toWorld(c.cx, c.cy);
+      anim.setLocal(r.id, w.x + off.dx, w.y + off.dy);
+      setDragging(new Set(c.ids));
+      setSelection(new Set([r.id]));
+    });
   };
 
   const endDrag = () => {
@@ -582,6 +658,16 @@ export function Table() {
     cur.cy = cy;
     moveGhost(cx, cy, cur.gx, cur.gy);
     const hr = handRef.current?.getBoundingClientRect();
+    if (hr && cy < hr.top - 10 && rulesGame()) {
+      // 규칙 게임: 테이블로 끌어 올리면 "이 카드 내기" (우노: 내기 / 바퀴벌레: 넘기기 창)
+      const cardId = cur.cardId;
+      g.current = { kind: "none" };
+      setGhost(null);
+      setHandInsert(null);
+      setHandDragId(null);
+      handTap(cardId);
+      return;
+    }
     if (hr && cy < hr.top - 10) {
       // 손패 영역 밖으로 → 테이블에 내놓고 계속 끌기
       const w = toWorld(cx, cy);
@@ -662,7 +748,7 @@ export function Table() {
     g.current = { kind: "press", pid: e.pointerId, sx: e.clientX, sy: e.clientY, target, shift: e.shiftKey || e.ctrlKey || e.metaKey, touch, button: e.button };
     clearLongPress();
     const tobj = target.t === "obj" ? objOf(target.id) : undefined;
-    if (tobj?.kind === "stack" && !tobj.pinned && e.button === 0) {
+    if (tobj?.kind === "stack" && !tobj.pinned && !tobj.system && e.button === 0) {
       // 더미 꾹 누르기 → 더미 전체 들기 (끌면 더미 전체 이동, 터치로 그냥 떼면 메뉴)
       const pid = e.pointerId;
       const sid = tobj.id;
@@ -733,6 +819,11 @@ export function Table() {
       return;
     }
     const sel = selRef.current;
+    // 게임이 관리하는 카드(우노 덱·버린 카드 등): 끌면 화면 이동
+    if (o.system) {
+      g.current = { kind: "pan", pid: cur.pid, sx: cur.sx, sy: cur.sy, camX: cam.current.x, camY: cam.current.y };
+      return;
+    }
     // 🔒 잠긴 것: 낱장·손잡이·여러 장 끌기는 화면 이동으로 (잠긴 더미 본체를 끌면 한 장 뽑기는 그대로)
     if (o.pinned && (o.kind === "card" || tgt.t === "grip" || (sel.has(o.id) && sel.size > 1))) {
       const now = performance.now();
@@ -851,6 +942,14 @@ export function Table() {
           setLiftId(null);
           if (cancelled) return;
           const tgt = cur.target;
+          if (tgt.t === "hand") {
+            handTap(tgt.id); // 규칙 게임이면 내기, 아니면 아무 일 없음
+            return;
+          }
+          if ((tgt.t === "obj" || tgt.t === "grip") && objOf(tgt.id)?.system) {
+            deckTap(tgt.id); // 우노 덱 탭 → 1장 뽑기
+            return;
+          }
           if (cur.held) {
             // 꾹 눌렀다가 움직이지 않고 뗌: 터치는 메뉴, 마우스는 선택만
             if (cur.touch) openMenuFor(e.clientX, e.clientY, tgt);
@@ -998,7 +1097,7 @@ export function Table() {
   const selActions = useMemo(
     () =>
       selection.size
-        ? buildActions({ ids: [...selection], openPrompt, clearSelection: () => setSelection(new Set()), openCustom: (stackId) => setCustom({ stackId }) })
+        ? buildActions({ ids: [...selection], openPrompt, clearSelection: () => setSelection(new Set()) })
         : [],
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [selection, st.objects, st.room],
@@ -1028,9 +1127,10 @@ export function Table() {
   };
 
   const players = room.players;
+  const unoGame = room.game?.kind === "uno" ? room.game : null;
 
   return (
-    <div className={`app bg-${room.settings.background} ${prefs.shadows ? "shadows" : "noshadows"} ${room.preset === "cockroach" && room.claim ? "has-claim" : ""}`}>
+    <div className={`app bg-${room.settings.background} ${prefs.shadows ? "shadows" : "noshadows"} ${room.game ? `has-game game-${room.game.kind}` : ""}`}>
       <div
         className="view"
         ref={viewRef}
@@ -1074,11 +1174,11 @@ export function Table() {
       </div>
 
       <GameBar onPickGame={() => setShowGame(true)} onCustom={() => setCustom({})} />
-      <ClaimPanel />
+      <GamePanel />
       <TopBar onSettings={() => setShowSettings(true)} onHelp={() => setShowHelp(true)} onKick={(id, name) => setConfirm({ text: `${name}님을 내보낼까요?`, onOk: () => act("host:kick", { playerId: id }) })} />
 
       <div className="bottom" ref={bottomRef}>
-        <UnoButton />
+        <GameButtons />
         {selActions.length > 0 && (
           <ActionBar
             count={selection.size}
@@ -1141,7 +1241,7 @@ export function Table() {
                 return (
                   <div
                     key={c.id}
-                    className={`hcard ${c.shape === "L" ? "shape-L" : ""} ${handDragId === c.id ? "hidden" : ""}`}
+                    className={`hcard ${c.shape === "L" ? "shape-L" : ""} ${handDragId === c.id ? "hidden" : ""} ${unoGame && unoGame.turn === me && !unoGame.winner ? (unoPlayable(c.face, unoGame, c.id) ? "playable" : "dim") : ""}`}
                     data-hid={c.id}
                     data-row={slot(i).row}
                     style={{ transform: `translate(${x}px, ${sl.y + lift}px) rotate(${angle}deg)`, zIndex: i + 1 }}
@@ -1207,7 +1307,17 @@ export function Table() {
           onCancel={() => setConfirm(null)}
         />
       )}
+      {st.serverVersion && st.serverVersion !== APP_VERSION && (
+        <div className="version-warn" onPointerDown={(e: React.PointerEvent) => e.stopPropagation()}>
+          ⚠️ 서버({st.serverVersion})와 화면({APP_VERSION}) 버전이 달라요. 서버가 새 코드로 다시 배포되지 않았어요 — 일부 기능(규칙 게임·흔들기 등)이 안 될 수 있어요.
+          <button className="mini" onClick={() => setState({ serverVersion: APP_VERSION })} title="닫기">
+            ✕ 닫기
+          </button>
+        </div>
+      )}
       <PeekModal />
+      <GameModals />
+      <UnoFxLayer />
       <Banner />
       <Toasts />
       {st.status !== "online" && <div className="conn-banner">⚡ 연결이 끊겼어요. 다시 연결하는 중…</div>}

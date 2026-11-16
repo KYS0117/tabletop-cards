@@ -3,6 +3,7 @@ import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import type * as React from "react";
 import { MAX_PLAYERS, type Background } from "../../shared/protocol";
 import type { Action } from "./actions";
+import { APP_VERSION } from "../../shared/version";
 import { SoundSettings } from "./gametools";
 import { act, leaveRoom } from "./net";
 import { setPrefs, usePrefs } from "./prefs";
@@ -107,7 +108,9 @@ export function BottomBar(props: {
   onNewDeck: (x: number, y: number) => void;
 }) {
   const prefs = usePrefs();
-  const host = isHostMe();
+  const st = useStore();
+  const g = st.room?.game;
+  const host = isHostMe() && !(g && g.kind !== "propose"); // 규칙 게임 중엔 덱 추가 없음
   return (
     <div className="bottombar" onPointerDown={(e: React.PointerEvent) => e.stopPropagation()}>
       <button className="tool hand-toggle" onClick={props.onToggleHand}>
@@ -417,6 +420,7 @@ export function SettingsModal({ onClose, askConfirm, onPickGame }: { onClose: ()
             🚪 방 나가기
           </button>
           <p className="muted small">※ 게임방은 서버 메모리에만 저장돼요. 서버가 재시작되면 방과 카드가 모두 사라집니다.</p>
+          <p className="muted small">버전: 화면 {APP_VERSION} · 서버 {st.serverVersion ?? "?"}</p>
         </section>
         <button className="btn primary wide" onClick={onClose}>
           닫기
@@ -471,13 +475,15 @@ export function HelpModal({ onClose }: { onClose: () => void }) {
         </ul>
         <h4>🎲 게임 도구 (화면 위)</h4>
         <ul>
-          <li><b>게임 이름</b>(방장): 프로포즈 / 우노 방식 / 자유 테이블 중 골라 자동으로 준비</li>
-          <li><b>⏱ 타이머</b>: 누구나 시간 설정·시작·멈춤. 모두에게 같은 시간이 보여요</li>
-          <li><b>💍 반지</b>: 마음에 든 프로포즈를 한 사람에게 ＋. 3개 모으면 승리!</li>
-          <li><b>✍ 카드 쓰기</b>: 직접 쓴 카드를 덱에 섞거나 손패로</li>
+          <li><b>게임 이름</b>(방장): 프로포즈 / 우노 / 바퀴벌레 포커 / 자유 테이블 중 골라 자동으로 준비</li>
+          <li><b>💌 프로포즈</b>: 라운드마다 "프로포즈 받는 사람" 한 명만 반지를 줄 수 있어요 (한 라운드에 1개). 반지 3개를 받으면 승리! 받는 사람은 라운드마다 돌아가요</li>
+          <li><b>🌈 우노 · 🪳 바퀴벌레 포커</b>: 규칙이 자동이에요. 내 차례에 손패 카드를 <b>탭</b>(또는 위로 끌기)하면 내기·넘기기, 우노는 덱을 탭하면 1장 뽑기</li>
+          <li><b>🔔 우노!</b>: 손패가 1~2장이면 오른쪽 아래 버튼. 안 외치고 1장이 남으면 다른 사람이 🚨 잡기 → 2장 받음</li>
+          <li><b>🪳 선언</b>: 받은 사람은 🙆 진짜 / 🙅 거짓말로 대답하거나 👁 몰래 보고 아직 안 본 사람에게 넘기기. 같은 벌레 4장이면 패배</li>
+          <li><b>⏱ 타이머</b>: 누구나 시간 설정(최대 5분)·시작·멈춤. 모두에게 같은 시간이 보여요</li>
+          <li><b>✍ 카드 쓰기</b> (프로포즈 게임): 직접 쓴 카드를 덱에 섞거나 손패로</li>
+          <li><b>🫨 흔들기</b>: 카드나 더미를 잡고 좌우로 빠르게 흔들면 주변 카드가 모여 한 더미가 돼요</li>
           <li><b>🔊 소리</b>: 전체·배경음악·효과음·알림 볼륨 (방장은 배경음악 곡 선택)</li>
-          <li><b>🔔 우노!</b>: 우노 게임에서 손패가 1~2장이면 오른쪽 아래에 버튼이 나와요</li>
-          <li><b>📣 선언 · 👁 몰래 보기</b>: 바퀴벌레 포커에서 뒷면 카드를 내고 선언, 받은 사람은 진짜/거짓말 대답 또는 몰래 보고 넘기기</li>
         </ul>
         <button className="btn primary wide" onClick={onClose}>
           시작하기

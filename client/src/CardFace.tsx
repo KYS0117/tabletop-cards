@@ -90,7 +90,8 @@ export const CardFace = memo(function CardFace({ face, back }: { face: Face | nu
   }
   if (p.type === "uno") {
     const label = UNO_SYMBOL[p.value] ?? p.value;
-    const wild = p.color === "W";
+    // 와일드: 손에 있을 땐 검은색, 내서 색을 고르면 그 색으로 칠해진 와일드 (U:B-W 처럼)
+    const wild = p.value === "W" || p.value === "D4";
     return (
       <div className={`card face uno uno-${p.color}`}>
         <div className="uno-corner tl">{label}</div>

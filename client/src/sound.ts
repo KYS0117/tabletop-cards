@@ -156,7 +156,7 @@ function burst(when: number, dur: number, dest: AudioNode, o: NoiseOpt = {}) {
 // ---------------------------------------------------------------------
 // 효과음
 // ---------------------------------------------------------------------
-export type Sfx = "pick" | "place" | "flip" | "shuffle" | "draw" | "deal" | "ring" | "win" | "alarm" | "tick" | "join" | "uno" | "claim" | "peek";
+export type Sfx = "pick" | "place" | "flip" | "shuffle" | "draw" | "deal" | "ring" | "win" | "alarm" | "tick" | "join" | "uno" | "claim" | "peek" | "wild" | "skip" | "reverse" | "attack";
 
 const CHANNEL: Record<Sfx, Channel> = {
   pick: "sfx",
@@ -173,6 +173,10 @@ const CHANNEL: Record<Sfx, Channel> = {
   uno: "alert",
   claim: "alert",
   peek: "sfx",
+  wild: "sfx",
+  skip: "sfx",
+  reverse: "sfx",
+  attack: "sfx",
 };
 
 const lastPlayed = new Map<Sfx, number>();
@@ -238,6 +242,30 @@ export function sfx(name: Sfx, volume = 1) {
     case "claim":
       tone(523.25, t, 0.1, out, { type: "triangle", gain: 0.14 });
       tone(783.99, t + 0.09, 0.18, out, { type: "triangle", gain: 0.14 });
+      break;
+    case "wild": {
+      // 반짝이며 올라가는 4음 (색이 바뀌는 느낌)
+      [523.25, 659.25, 783.99, 1046.5, 1318.5].forEach((f, i) => tone(f, t + i * 0.055, 0.22, out, { type: "triangle", gain: 0.12, release: 0.22 }));
+      burst(t, 0.45, out, { freq: 1500, to: 7000, q: 0.8, gain: 0.08, attack: 0.15 });
+      break;
+    }
+    case "skip":
+      // "삐-익" 막히는 소리
+      tone(520, t, 0.12, out, { type: "square", gain: 0.1, filter: 2200 });
+      tone(330, t + 0.12, 0.22, out, { type: "square", gain: 0.11, to: 220, filter: 1800 });
+      break;
+    case "reverse":
+      // 휙- 휙 (올라갔다 내려감)
+      burst(t, 0.22, out, { freq: 600, to: 3200, q: 1.5, gain: 0.2, attack: 0.05 });
+      burst(t + 0.2, 0.22, out, { freq: 3200, to: 600, q: 1.5, gain: 0.2, attack: 0.05 });
+      tone(440, t, 0.2, out, { type: "triangle", to: 880, gain: 0.08 });
+      tone(880, t + 0.2, 0.2, out, { type: "triangle", to: 440, gain: 0.08 });
+      break;
+    case "attack":
+      // 쿵! + 카드 날아가는 소리
+      tone(150, t, 0.35, out, { to: 45, gain: 0.45, release: 0.35 });
+      burst(t, 0.12, out, { type: "lowpass", freq: 900, gain: 0.4 });
+      for (let i = 0; i < 4; i++) burst(t + 0.08 + i * 0.07, 0.06, out, { freq: 2600, to: 4800, q: 1.5, gain: 0.16 });
       break;
     case "peek":
       burst(t, 0.22, out, { freq: 900, to: 2600, q: 2, gain: 0.12, attack: 0.08 });

@@ -203,7 +203,7 @@ on("state:full", (d) => {
     anim.setTarget(o.id, o.x, o.y, o.rot, true);
   }
   setServerNow(d.room.serverNow);
-  setState({ room: d.room, objects, hand: d.hand, kicked: null });
+  setState({ room: d.room, objects, hand: d.hand, kicked: null, serverVersion: d.room.version ?? "알 수 없음(이전 버전)" });
   sound.setBgm(d.room.bgm?.track ?? null);
 });
 
@@ -231,13 +231,41 @@ on("obj:upsert", (d) => {
   setState({ objects });
 });
 
-on("obj:remove", (d) => {
-  const objects = new Map(getState().objects);
+/** 흔들어 모으기: 빨려 들어가는 카드는 잠깐(연출 시간) 더 보여 준 뒤 지움 */
+const gatheringUntil = new Map<string, number>();
+const GATHER_FX_MS = 260;
+
+on("fx:gather", (d) => {
+  const objects = getState().objects;
+  const now = performance.now();
   for (const id of d.ids) {
+    const o = objects.get(id);
+    anim.setTarget(id, d.x, d.y, o?.rot ?? 0);
+    gatheringUntil.set(id, now + GATHER_FX_MS);
+  }
+  sound.sfx("shuffle", d.by === getState().session?.playerId ? 1 : 0.6);
+});
+
+function removeNow(ids: string[]) {
+  const objects = new Map(getState().objects);
+  for (const id of ids) {
     objects.delete(id);
     anim.forget(id);
   }
   setState({ objects });
+}
+
+on("obj:remove", (d) => {
+  const now = performance.now();
+  const later = d.ids.filter((id) => (gatheringUntil.get(id) ?? 0) > now);
+  const nowIds = d.ids.filter((id) => !later.includes(id));
+  if (nowIds.length) removeNow(nowIds);
+  if (later.length) {
+    window.setTimeout(() => {
+      for (const id of later) gatheringUntil.delete(id);
+      removeNow(later);
+    }, GATHER_FX_MS);
+  }
 });
 
 on("obj:moving", (d) => {
@@ -253,13 +281,33 @@ on("obj:moving", (d) => {
 
 on("peek", (d) => setState({ peek: d }));
 
+// 우노 특수 카드 연출: 잠깐 보여 주고 사라짐 (규칙 처리는 서버가 이미 끝냄)
+let unoFxKey = 0;
+on("fx:uno", (d) => {
+  const key = ++unoFxKey;
+  setState({ unoFx: { ...d, key } });
+  const me = getState().session?.playerId;
+  if (d.effect === "draw") {
+    sound.sfx("attack");
+    if (d.target === me) navigator.vibrate?.([60, 40, 120]);
+  } else if (d.effect === "skip") {
+    sound.sfx("skip");
+    if (d.target === me) navigator.vibrate?.(80);
+  } else sound.sfx(d.effect);
+  window.setTimeout(() => {
+    if (getState().unoFx?.key === key) setState({ unoFx: null });
+  }, 1700);
+});
+
 on("hand:update", (d) => {
   if (d.hand.length > getState().hand.length) sound.sfx("draw");
   setState({ hand: d.hand as HandCard[] });
 });
 
 on("notice", (d) => {
-  if (d.kind !== "win") toast(d.text, d.kind ?? "info"); // 승리는 큰 배너로만
+  // 승리·패배는 큰 배너로만, 바퀴벌레 포커 선언은 화면 위 진행 표시줄에 이미 보이므로 알림 생략
+  const roachClaim = d.kind === "claim" && d.text.startsWith("📣") && getState().room?.game?.kind === "roach";
+  if (d.kind !== "win" && d.kind !== "lose" && !roachClaim) toast(d.text, d.kind ?? "info");
   if (d.kind === "shuffle") sound.sfx("shuffle");
   else if (d.kind === "deal") sound.sfx("deal");
   else if (d.kind === "ring") sound.sfx("ring");
@@ -272,6 +320,9 @@ on("notice", (d) => {
   else if (d.kind === "win") {
     sound.sfx("win");
     showBanner(d.text, "win");
+  } else if (d.kind === "lose") {
+    sound.sfx("alarm");
+    showBanner(d.text, "lose", 4000);
   }
   if (d.kind === "shuffle" && d.stackId) {
     const el = document.querySelector(`[data-oid="${CSS.escape(d.stackId)}"]`);
