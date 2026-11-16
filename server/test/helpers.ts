@@ -68,4 +68,11 @@ export function leaks(sent: Sent[], faces: string[]) {
   return faces.filter((f) => text.includes(`"${f}"`));
 }
 
+/** 규칙 게임 대기실에서 방장이 "게임 시작" */
+export function startRules(room: Room): string | null {
+  const g = room.game as unknown as { kind?: string; start?: (p: IPlayer) => string | null } | null;
+  if (!g || g.kind !== "lobby" || !g.start) return "대기실이 아니에요";
+  return g.start(room.players.get(room.hostId)!);
+}
+
 export type { IPlayer };

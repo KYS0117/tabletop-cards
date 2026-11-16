@@ -45,15 +45,91 @@ export const CREATURES = [
 ] as const;
 export type CreatureId = (typeof CREATURES)[number]["id"];
 
-/** 바퀴벌레 포커 선언: "by 가 to 에게 이 카드는 creature 라고 말함" + 받은 사람의 대답 */
-export interface ClaimState {
+// ---------------------------------------------------------------------
+// 규칙이 자동인 게임의 공개 상태 (모두에게 같은 내용, 숨김 정보 없음)
+// ---------------------------------------------------------------------
+export type UnoColor = "R" | "Y" | "G" | "B";
+
+export interface PubUno {
+  kind: "uno";
+  /** 차례 순서 (플레이어 id) */
+  order: string[];
+  /** 지금 차례 */
+  turn: string | null;
+  dir: 1 | -1;
+  /** 지금 내야 하는 색 (와일드로 고른 색 포함) */
+  color: UnoColor;
+  /** 지금 차례인 사람이 이번 차례에 이미 한 장 뽑았는지 (뽑은 카드만 낼 수 있음) */
+  drew: boolean;
+  /** 카드가 1장 남았는데 아직 아무도 "우노!"를 안 누른 사람들.
+   *  본인이 먼저 누르면 안전, 다른 사람이 먼저 누르면 그 사람은 1장 받음 */
+  pending: string[];
+  winner: string | null;
+  deckId: string;
+  pileId: string;
+  /** 마지막에 일어난 일 (화면 표시용) */
+  last: string;
+}
+
+export interface UnoFx {
+  /** wild: 색 바꾸기 / skip: 건너뛰기 / reverse: 방향 바꾸기 / draw: +2·+4 공격 */
+  effect: "wild" | "skip" | "reverse" | "draw";
   by: string;
+  /** 건너뛰기·공격 당한 사람 */
+  target: string | null;
+  /** 지금 색 (와일드로 고른 색) */
+  color: UnoColor;
+  /** 공격 장수 (+2 / +4) */
+  n: number;
+  /** 와일드 +4 처럼 색도 바꾼 공격인지 */
+  recolor: boolean;
+}
+
+export interface RoachClaim {
+  from: string;
   to: string;
   creature: CreatureId;
-  /** yes = "진짜라고 생각해", no = "거짓말이야" */
-  answer: "yes" | "no" | null;
-  at: number;
 }
+
+export interface PubRoach {
+  kind: "roach";
+  /** give: active 가 카드를 넘길 차례 / respond: chain 마지막 받은 사람이 대답·넘기기 / reveal: 공개 중 / over: 끝 */
+  phase: "give" | "respond" | "reveal" | "over";
+  active: string;
+  /** 지금 오가는 카드가 지나온 선언들 */
+  chain: RoachClaim[];
+  /** 테이블 가운데 오가는 카드 (뒷면) */
+  cardId: string | null;
+  order: string[];
+  /** 앞에 놓인 벌칙 카드 수: 플레이어 → 벌레 → 장수 */
+  penalties: Record<string, Partial<Record<CreatureId, number>>>;
+  loser: string | null;
+  loseReason: string;
+  /** 공개 결과 (phase reveal) */
+  reveal: { face: string; creature: CreatureId; said: "yes" | "no"; truth: boolean; taker: string } | null;
+  /** 지금 카드를 받은 사람이 몰래 봤으면 그 사람 (넘길 수 있음) */
+  peekedBy: string | null;
+}
+
+export interface PubPropose {
+  kind: "propose";
+  /** 이번 라운드에 프로포즈를 받는 사람 (반지를 줄 수 있는 유일한 사람) */
+  receiver: string | null;
+  round: number;
+  /** 이번 라운드에 반지를 받은 사람 */
+  given: string | null;
+}
+
+/** 규칙 게임 대기실: 방장이 "게임 시작"을 누르면 접속한 사람들로 순서를 정해 시작 */
+export interface PubLobby {
+  kind: "lobby";
+  game: "uno" | "cockroach";
+  /** 참가할 사람 (지금 접속 중) */
+  players: string[];
+  min: number;
+}
+
+export type PubGame = PubUno | PubRoach | PubPropose | PubLobby;
 
 /** 타이머 최대 시간 (초) */
 export const TIMER_MAX_SEC = 300;
@@ -78,6 +154,8 @@ export interface PubCard {
   lockedBy: string | null;
   /** 🔒 잠금: 옮기기·뒤집기·회전·삭제 불가 */
   pinned?: boolean;
+  /** 게임이 관리하는 카드 (손으로 조작 불가) */
+  system?: boolean;
 }
 
 /** 테이블 위 카드 더미(덱). 안쪽 카드의 순서와 정체는 서버만 알고 있음 */
@@ -101,6 +179,8 @@ export interface PubStack {
   lockedBy: string | null;
   /** 🔒 잠금: 더미 자체는 옮기기·뒤집기·회전·삭제 불가 (카드 뽑기·섞기·쌓기는 가능) */
   pinned?: boolean;
+  /** 게임이 관리하는 더미 (우노 덱·버린 카드 등, 손으로 조작 불가) */
+  system?: boolean;
 }
 
 export type PubObj = PubCard | PubStack;
@@ -171,10 +251,12 @@ export interface PubRoom {
   score: ScoreConfig | null;
   timer: TimerState;
   bgm: { track: BgmTrack | null };
-  /** 바퀴벌레 포커의 마지막 선언 */
-  claim: ClaimState | null;
+  /** 규칙이 자동인 게임의 상태 (자유 테이블이면 null) */
+  game: PubGame | null;
   /** 이 데이터를 보낸 순간의 서버 시각 (타이머 시계 맞추기용) */
   serverNow: number;
+  /** 서버 버전 (shared/version.ts) — 화면 버전과 다르면 배포가 덜 된 것 */
+  version?: string;
 }
 
 export interface Move {
@@ -194,7 +276,11 @@ export interface ServerEvents {
   "obj:moving": { by: string; moves: Move[] };
   "hand:update": { hand: HandCard[] };
   cursor: { by: string; x: number; y: number };
-  notice: { text: string; kind?: "join" | "leave" | "info" | "shuffle" | "warn" | "ring" | "win" | "deal" | "uno" | "claim" | "peek"; stackId?: string };
+  notice: { text: string; kind?: "join" | "leave" | "info" | "shuffle" | "warn" | "ring" | "win" | "deal" | "uno" | "claim" | "peek" | "lose"; stackId?: string };
+  /** 흔들어 모으기 연출: ids 카드들이 (x,y)로 빨려 들어가 into 더미가 됨 */
+  "fx:gather": { into: string; ids: string[]; x: number; y: number; by: string };
+  /** 우노 특수 카드 연출 (색 바꾸기·건너뛰기·방향 바꾸기·공격) — 규칙 처리는 이미 끝난 뒤 보여 주기만 */
+  "fx:uno": UnoFx;
   /** 몰래 보기 결과 — 요청한 사람에게만 전송 */
   peek: { id: string; face: Face; back: BackStyle; shape?: Shape };
   kicked: { reason: string };
@@ -216,6 +302,8 @@ export interface ClientRequests {
   "obj:delete": { ids: string[] };
   /** 🔒 잠그기/풀기 (풀기는 잠근 사람 또는 방장) */
   "obj:pin": { ids: string[]; pinned: boolean };
+  /** 잡고 흔들기: 들고 있는 카드/더미 주변의 카드를 모아 한 더미로 (들고 있는 것은 계속 들고 있음) */
+  "obj:shake": { id: string; x: number; y: number };
   /** 뒷면 카드 몰래 보기 (나에게만 보이고, 모두에게 "봤다"는 알림) */
   "obj:peek": { id: string };
   "stack:take": { stackId: string };
@@ -236,7 +324,7 @@ export interface ClientRequests {
   "game:preset": { preset: PresetId };
   /** 커스텀 글자 카드 만들기: 한 줄에 한 장. 덱에 섞거나 내 손패로 */
   "custom:create": { lines: string[]; target: "deck" | "hand"; stackId?: string };
-  /** 점수(반지) 주기/빼기 — 누구나 가능 (자유 진행) */
+  /** 점수(반지) 고치기 — 방장만 (실수 바로잡기) */
   "score:add": { playerId: string; delta: number };
   "timer:set": { seconds: number };
   "timer:start": Record<string, never>;
@@ -244,11 +332,25 @@ export interface ClientRequests {
   "timer:reset": Record<string, never>;
   /** 배경음악 (방장) */
   "bgm:set": { track: BgmTrack | null };
-  /** 우노! 외치기 (우노 게임, 손패 2장 이하) */
-  "uno:call": Record<string, never>;
-  /** 바퀴벌레 포커: 선언하기 / 대답하기 */
-  "claim:say": { to: string; creature: CreatureId };
-  "claim:answer": { answer: "yes" | "no" };
+  /** 우노 (규칙 자동) */
+  /** 우노! — target 이 없거나 나 자신이면 "내 우노", 다른 사람이면 "먼저 눌러서 잡기" */
+  "uno:call": { target?: string };
+  "uno:play": { cardId: string; color?: UnoColor };
+  "uno:draw": Record<string, never>;
+  "uno:pass": Record<string, never>;
+  /** 바퀴벌레 포커 (규칙 자동) */
+  "roach:give": { cardId: string; to: string; creature: CreatureId };
+  "roach:answer": { answer: "yes" | "no" };
+  "roach:peek": Record<string, never>;
+  "roach:pass": { to: string; creature: CreatureId };
+  /** 프로포즈: 받는 사람이 반지 주기 / 다음 라운드 / 받는 사람 바꾸기(방장) */
+  "propose:ring": { to: string };
+  "propose:next": Record<string, never>;
+  "propose:receiver": { playerId: string };
+  /** 방장: 대기실에서 게임 시작 (순서는 무작위로 정해짐) */
+  "game:start": Record<string, never>;
+  /** 방장: 멈춘 게임 진행시키기 (우노: 지금 차례 넘기기, 바퀴벌레: 오가는 카드 되돌리기) */
+  "game:skip": Record<string, never>;
   cursor: { x: number; y: number }; // ack 없음
   // 개발자 측정
   "perf:ping": { t: number };

@@ -7,7 +7,7 @@
 // =====================================================================
 import type { Server, Socket } from "socket.io";
 import {
-  CREATURES,
+
   CUSTOM_LINES_MAX,
   CUSTOM_TEXT_MAX,
   MAX_IDS_PER_REQUEST,
@@ -18,8 +18,6 @@ import {
   type BackStyle,
   type Background,
   type BgmTrack,
-  type ClaimState,
-  type CreatureId,
   type DeckType,
   type Face,
   type GameMode,
@@ -39,10 +37,12 @@ import {
   cardSize,
 } from "../../shared/protocol";
 import { builtinDeck } from "../../shared/cards";
+import { APP_VERSION } from "../../shared/version";
 import { loadImageDeck } from "./decks";
+import type { GameEngine } from "./games/types";
 import { clamp, cleanText, isFiniteNum, newId, newToken, normRot, randomIndex, shuffleInPlace } from "./util";
 
-interface ICard {
+export interface ICard {
   kind: "card";
   id: string;
   face: Face;
@@ -57,6 +57,8 @@ interface ICard {
   lockAt: number;
   /** 🔒 잠금 (잠근 사람 id) */
   pinnedBy?: string;
+  /** 게임이 관리하는 물체 (손으로 조작 불가) */
+  system?: boolean;
 }
 
 export interface IStackCard {
@@ -65,7 +67,7 @@ export interface IStackCard {
   shape?: Shape;
 }
 
-interface IStack {
+export interface IStack {
   kind: "stack";
   id: string;
   /** cards[0] = 맨 아래, 마지막 = 맨 위 */
@@ -83,6 +85,8 @@ interface IStack {
   lockAt: number;
   /** 🔒 잠금 (잠근 사람 id) */
   pinnedBy?: string;
+  /** 게임이 관리하는 물체 (손으로 조작 불가) */
+  system?: boolean;
 }
 
 export type IObj = ICard | IStack;
@@ -109,7 +113,11 @@ const BGM_TRACKS: BgmTrack[] = ["calm", "party", "mystery", "fantasy", "tension"
 const LOCK_STALE_MS = 15_000;
 const BACKGROUNDS: Background[] = ["felt", "navy", "black", "wood"];
 const SCALES = [0.8, 1, 1.25];
+/** 흔들어 모으기 범위 (카드 폭의 배수) */
+const SHAKE_RADIUS = 3;
 const PINNED_MSG = "🔒 잠긴 카드예요 (메뉴에서 잠금 풀기)";
+const SYSTEM_MSG = "게임이 관리하는 카드예요 (화면의 버튼으로 진행하세요)";
+const RULES_MSG = "이 게임은 규칙이 자동이라 차례에 맞게 화면의 버튼으로 진행해요";
 
 export class Room {
   readonly code: string;
@@ -122,8 +130,8 @@ export class Room {
   score: ScoreConfig | null = null;
   timer: TimerState = { durationMs: 60_000, running: false, endsAt: null, remainingMs: 60_000 };
   bgm: { track: BgmTrack | null } = { track: null };
-  /** 바퀴벌레 포커의 마지막 선언 */
-  claim: ClaimState | null = null;
+  /** 규칙이 자동인 게임 (우노·바퀴벌레 포커·프로포즈 라운드). 자유 테이블이면 null */
+  game: GameEngine | null = null;
   hostId = "";
   settings: RoomSettings = { background: "felt", cardScale: 1, allowEveryoneDelete: false };
   players = new Map<string, IPlayer>();
@@ -180,6 +188,7 @@ export class Room {
       };
       if (o.shape === "L") c.shape = "L";
       if (o.pinnedBy) c.pinned = true;
+      if (o.system) c.system = true;
       return c;
     }
     const top = o.cards[o.cards.length - 1];
@@ -201,6 +210,7 @@ export class Room {
     if (o.keep) s.keep = true;
     if (o.label) s.label = o.label;
     if (o.pinnedBy) s.pinned = true;
+    if (o.system) s.system = true;
     return s;
   }
 
@@ -233,8 +243,9 @@ export class Room {
       score: this.score ? { ...this.score } : null,
       timer: { ...this.timer },
       bgm: { ...this.bgm },
-      claim: this.claim ? { ...this.claim } : null,
+      game: this.game ? this.game.pub() : null,
       serverNow: Date.now(),
+      version: APP_VERSION,
     };
   }
 
@@ -245,6 +256,30 @@ export class Room {
   // ------------------------------------------------------------------
   // 전송 도우미 — 방 단위(io.to(code))로만 보내므로 다른 방에 새지 않음
   // ------------------------------------------------------------------
+  /** 게임 모듈용: 바뀐 물체 / 사라진 물체 알리기 */
+  emitUpsert(objs: IObj[]) {
+    this.upsert(objs);
+  }
+  emitRemove(ids: string[]) {
+    this.removeIds(ids);
+  }
+  /** 게임 모듈용: 게임이 관리하는 낱장 카드 만들기 */
+  addSystemCard(face: Face, back: BackStyle, x: number, y: number, shape: Shape = "P"): ICard {
+    const c = this.makeCard(face, back, false, x, y, 0, shape);
+    c.system = true;
+    this.objs.set(c.id, c);
+    this.upsert([c]);
+    return c;
+  }
+  /** 게임 모듈용: 플레이어 한 명에게만 보내기 */
+  /** 방 전체에 연출 이벤트 */
+  emitFx(data: ServerEvents["fx:uno"]) {
+    this.io.to(this.code).emit("fx:uno", data);
+  }
+  sendTo(pid: string, ev: "peek", data: ServerEvents["peek"]) {
+    this.io.to(`p:${pid}`).emit(ev, data);
+  }
+
   private upsert(objs: IObj[]) {
     if (objs.length) this.io.to(this.code).emit("obj:upsert", { objects: objs.map((o) => this.pub(o)) });
   }
@@ -269,8 +304,13 @@ export class Room {
   private isLockedByOther(o: IObj, pid: string): boolean {
     return !!o.lockedBy && o.lockedBy !== pid && Date.now() - o.lockAt < LOCK_STALE_MS;
   }
+  /** 게임이 관리하는 물체는 손으로 조작 불가, 다른 사람이 잡고 있으면 불가 */
   private canTouch(o: IObj, pid: string): boolean {
-    return !this.isLockedByOther(o, pid);
+    return !o.system && !this.isLockedByOther(o, pid);
+  }
+  /** 조작할 수 없는 이유 (메시지) */
+  private touchError(o: IObj): string {
+    return o.system ? SYSTEM_MSG : "다른 사람이 잡고 있어요";
   }
   /** 잠기지 않았고 다른 사람이 잡고 있지 않음 → 옮기기·뒤집기·회전·삭제 가능 */
   private canMove(o: IObj, pid: string): boolean {
@@ -337,7 +377,7 @@ export class Room {
   /** 카드 묶음을 더미로 테이블에 놓기 */
   addStack(
     cards: IStackCard[],
-    o: { x: number; y: number; shuffle?: boolean; faceUp?: boolean; shape?: Shape; keep?: boolean; label?: string; findSpot?: boolean },
+    o: { x: number; y: number; shuffle?: boolean; faceUp?: boolean; shape?: Shape; keep?: boolean; label?: string; findSpot?: boolean; system?: boolean },
   ): IStack {
     if (o.shuffle) shuffleInPlace(cards);
     const p = o.findSpot ? this.freeSpot(o.x, o.y) : this.clampPos(o.x, o.y);
@@ -347,8 +387,9 @@ export class Room {
       cards,
       faceUp: !!o.faceUp,
       shape: o.shape ?? cards[0]?.shape ?? "P",
-      keep: o.keep,
+      keep: o.keep || o.system,
       label: o.label,
+      system: o.system,
       x: p.x,
       y: p.y,
       rot: 0,
@@ -449,6 +490,8 @@ export class Room {
   /** 완전히 나감(나가기 버튼, 강퇴, 장시간 미접속). 손패는 테이블에 뒷면 더미로 내려놓음 */
   removePlayer(p: IPlayer, reason: string) {
     this.releaseLocksOf(p.id);
+    this.game?.onLeave?.(p);
+    if (this.game?.blocksFreePlay) p.hand = []; // 규칙 게임: 손패는 게임이 정리
     if (p.hand.length) {
       const cards: IStackCard[] = p.hand.map((h) => ({ face: h.face, back: h.back, shape: h.shape ?? "P" }));
       p.hand = [];
@@ -699,7 +742,7 @@ export class Room {
   takeTop(pid: string, stackId: string): PubCard | string {
     const s = this.objs.get(stackId);
     if (!s || s.kind !== "stack") return "더미를 찾을 수 없어요";
-    if (!this.canTouch(s, pid)) return "다른 사람이 잡고 있어요";
+    if (!this.canTouch(s, pid)) return this.touchError(s);
     const top = s.cards.pop();
     if (!top) return "빈 더미예요";
     const c = this.makeCard(top.face, top.back, s.faceUp, s.x, s.y, s.rot, top.shape ?? s.shape);
@@ -715,7 +758,7 @@ export class Room {
   drawToHand(p: IPlayer, stackId: string, count: number): string | null {
     const s = this.objs.get(stackId);
     if (!s) return "대상을 찾을 수 없어요";
-    if (!this.canTouch(s, p.id)) return "다른 사람이 잡고 있어요";
+    if (!this.canTouch(s, p.id)) return this.touchError(s);
     if (s.kind === "card") {
       if (s.pinnedBy) return PINNED_MSG;
       this.objs.delete(s.id);
@@ -738,7 +781,7 @@ export class Room {
   deal(pid: string, stackId: string, count: number): string | null {
     const s = this.objs.get(stackId);
     if (!s || s.kind !== "stack") return "더미를 찾을 수 없어요";
-    if (!this.canTouch(s, pid)) return "다른 사람이 잡고 있어요";
+    if (!this.canTouch(s, pid)) return this.touchError(s);
     const n = clamp(Math.floor(count) || 1, 1, 30);
     const { players, given } = this.dealFrom(s, n);
     const who = this.players.get(pid)?.nickname ?? "누군가";
@@ -773,7 +816,7 @@ export class Room {
   shuffle(pid: string, stackId: string): string | null {
     const s = this.objs.get(stackId);
     if (!s || s.kind !== "stack") return "더미를 찾을 수 없어요";
-    if (!this.canTouch(s, pid)) return "다른 사람이 잡고 있어요";
+    if (!this.canTouch(s, pid)) return this.touchError(s);
     shuffleInPlace(s.cards);
     this.upsert([s]);
     const who = this.players.get(pid)?.nickname ?? "누군가";
@@ -785,7 +828,7 @@ export class Room {
   spread(pid: string, stackId: string): string | null {
     const s = this.objs.get(stackId);
     if (!s || s.kind !== "stack") return "더미를 찾을 수 없어요";
-    if (!this.canTouch(s, pid)) return "다른 사람이 잡고 있어요";
+    if (!this.canTouch(s, pid)) return this.touchError(s);
     if (s.pinnedBy) return "🔒 잠긴 더미는 펼칠 수 없어요";
     if (!s.cards.length) return "빈 더미예요";
     const { w, h } = this.size(s.shape);
@@ -836,6 +879,7 @@ export class Room {
   // 손패
   // ------------------------------------------------------------------
   handTake(p: IPlayer, ids: string[]): string | null {
+    if (this.game?.blocksFreePlay) return RULES_MSG;
     const all = this.getObjs(ids);
     const objs = all.filter((o) => this.canMove(o, p.id));
     if (!objs.length) return all.some((o) => o.pinnedBy) ? PINNED_MSG : "가져올 수 있는 카드가 없어요";
@@ -861,6 +905,7 @@ export class Room {
   }
 
   handPlay(p: IPlayer, cardId: string, x: number, y: number, faceUp: boolean, grab: boolean): PubCard | string {
+    if (this.game?.blocksFreePlay) return RULES_MSG;
     const idx = p.hand.findIndex((h) => h.id === cardId);
     if (idx < 0) return "손패에 없는 카드예요";
     if (!isFiniteNum(x) || !isFiniteNum(y)) return "잘못된 위치예요";
@@ -901,7 +946,8 @@ export class Room {
     const ids = [...this.objs.keys()];
     this.objs.clear();
     this.removeIds(ids);
-    this.claim = null;
+    this.game?.dispose?.();
+    this.game = null;
     for (const p of this.players.values()) {
       p.hand = [];
       p.score = 0;
@@ -920,7 +966,7 @@ export class Room {
   }
 
   gather(): void {
-    const all = [...this.objs.values()].filter((o) => !o.pinnedBy).sort((a, b) => a.z - b.z); // 잠긴 것은 그대로
+    const all = [...this.objs.values()].filter((o) => !o.pinnedBy && !o.system).sort((a, b) => a.z - b.z); // 잠긴 것·게임 카드는 그대로
     if (!all.length) return;
     const cards: IStackCard[] = [];
     for (const o of all) {
@@ -934,6 +980,7 @@ export class Room {
   }
 
   newDeck(deck: DeckType): string | null {
+    if (this.game?.blocksFreePlay) return "규칙 게임 중에는 덱을 추가할 수 없어요 (자유 테이블로 바꾸면 가능)";
     const s = this.addDeck(deck, TABLE_W / 2, TABLE_H / 2, true);
     if (typeof s === "string") return s;
     const names: Record<DeckType, string> = { standard54: "트럼프 54장", uno108: "우노 방식 컬러 카드 108장", propose: "프로포즈 카드", cockroach: "바퀴벌레 포커 카드" };
@@ -948,11 +995,12 @@ export class Room {
     if (!Array.isArray(rawLines)) return "카드 내용을 입력해 주세요";
     const lines = rawLines.slice(0, CUSTOM_LINES_MAX).map((l) => cleanText(l, CUSTOM_TEXT_MAX)).filter(Boolean);
     if (!lines.length) return "카드 내용을 입력해 주세요";
-    // 섞을 덱: 지정한 더미 → 없으면 테이블에서 가장 큰 덱
-    let deck: IStack | undefined;
-    const pick = stackId ? this.objs.get(stackId) : undefined;
-    if (pick && pick.kind === "stack") deck = pick;
-    if (!deck) deck = [...this.objs.values()].filter((o): o is IStack => o.kind === "stack" && !o.keep).sort((a, b) => b.cards.length - a.cards.length)[0];
+    if (this.preset !== "propose") return "직접 쓰는 카드는 프로포즈 게임에서만 쓸 수 있어요";
+    // 섞을 덱: 프로포즈 게임의 덱 (게임이 관리하는 덱이지만 직접 쓴 카드는 섞을 수 있음)
+    void stackId;
+    const deckId = this.game?.kind === "propose" ? (this.game as unknown as { deckId: string }).deckId : undefined;
+    const found = deckId ? this.objs.get(deckId) : undefined;
+    const deck: IStack | undefined = found && found.kind === "stack" ? found : undefined;
     // 커스텀 카드는 덱과 같은 뒷면·모양으로 만들어서 섞으면 구별할 수 없게 함
     const back = deck?.cards[0]?.back ?? (this.preset === "propose" ? "propose" : "blue");
     const shape: Shape = deck?.shape ?? (this.preset === "propose" ? "L" : "P");
@@ -963,7 +1011,6 @@ export class Room {
       this.roomChanged();
       return { count: cards.length };
     }
-    if (!this.canTouch(deck, p.id)) return "다른 사람이 덱을 잡고 있어요";
     for (const c of cards) deck.cards.splice(randomIndex(deck.cards.length + 1), 0, c);
     this.upsert([deck]);
     this.notice(`${p.nickname}님이 직접 쓴 카드 ${cards.length}장을 덱에 섞었어요`, "shuffle", deck.id);
@@ -975,6 +1022,7 @@ export class Room {
   // ------------------------------------------------------------------
   scoreAdd(actor: IPlayer, targetId: string, delta: number): string | null {
     if (!this.score) return "이 게임에는 점수판이 없어요";
+    if (actor.id !== this.hostId) return "반지 수 고치기는 방장만 할 수 있어요";
     if (delta !== 1 && delta !== -1) return "잘못된 값이에요";
     const t = this.players.get(targetId);
     if (!t) return "플레이어를 찾을 수 없어요";
@@ -984,10 +1032,9 @@ export class Room {
     this.roomChanged();
     const { icon, label, goal } = this.score;
     if (delta > 0) {
-      const from = actor.id === t.id ? "" : `${actor.nickname}님이 `;
-      this.notice(`${icon} ${from}${t.nickname}님에게 ${label}를 줬어요 (${t.score}/${goal})`, "ring");
+      this.notice(`🛠 방장이 ${t.nickname}님의 ${label}를 하나 더했어요 (${t.score}/${goal})`, "info");
       if (before < goal && t.score >= goal) this.notice(`🎉 ${t.nickname}님이 ${label} ${goal}개를 모아 승리했어요!`, "win");
-    } else this.notice(`${t.nickname}님의 ${label}가 하나 줄었어요 (${t.score}/${goal})`, "info");
+    } else this.notice(`🛠 방장이 ${t.nickname}님의 ${label}를 하나 뺐어요 (${t.score}/${goal})`, "info");
     return null;
   }
 
@@ -1047,7 +1094,9 @@ export class Room {
   // ------------------------------------------------------------------
   /** 잠그기는 누구나, 풀기는 잠근 사람 또는 방장 */
   setPinned(pid: string, ids: string[], pinned: boolean): string | null {
-    const objs = this.getObjs(ids).filter((o) => this.canTouch(o, pid));
+    const all = this.getObjs(ids);
+    if (all.length && all.every((o) => o.system)) return SYSTEM_MSG;
+    const objs = all.filter((o) => this.canTouch(o, pid));
     const changed: IObj[] = [];
     let denied = 0;
     for (const o of objs) {
@@ -1085,53 +1134,52 @@ export class Room {
     return null;
   }
 
+  /**
+   * 🫨 잡고 흔들기: 내가 들고 있는 카드/더미 주변(카드 약 2.5장 거리)의 카드를 모아 한 더미로.
+   * 모은 카드는 들고 있는 것 아래에 깔리고, 더미는 계속 내가 들고 있음 (새 id 를 돌려줌).
+   */
+  shakeGather(pid: string, id: string, x: number, y: number): string | { id: string; count: number } {
+    if (this.game?.blocksFreePlay) return RULES_MSG;
+    const o = this.objs.get(id);
+    if (!o || o.lockedBy !== pid || o.system || o.pinnedBy) return "들고 있는 카드를 흔들어야 모을 수 있어요";
+    if (isFiniteNum(x) && isFiniteNum(y)) {
+      const p = this.clampPos(x, y);
+      o.x = p.x;
+      o.y = p.y;
+    }
+    const R = this.size(o.shape).w * SHAKE_RADIUS;
+    const near = [...this.objs.values()]
+      .filter((t) => t.id !== o.id && !t.system && !t.pinnedBy && !(t.kind === "stack" && t.keep) && !this.isLockedByOther(t, pid) && t.lockedBy !== pid)
+      .filter((t) => Math.hypot(t.x - o.x, t.y - o.y) <= R)
+      .sort((a, b) => a.z - b.z);
+    if (!near.length) return { id: o.id, count: 0 };
+    const oldId = o.id;
+    const target = this.toStack(o); // 낱장이면 1장짜리 더미로 (새 id)
+    target.lockedBy = pid;
+    target.lockAt = Date.now();
+    target.z = this.nextZ();
+    const under: IStackCard[] = [];
+    for (const t of near) {
+      if (t.kind === "card") under.push({ face: t.face, back: t.back, shape: t.shape });
+      else under.push(...t.cards);
+      this.objs.delete(t.id);
+    }
+    target.cards = [...under, ...target.cards];
+    const gathered = near.map((t) => t.id);
+    this.io.to(this.code).emit("fx:gather", { into: target.id, ids: gathered, x: target.x, y: target.y, by: pid });
+    this.removeIds(target.id === oldId ? gathered : [...gathered, oldId]);
+    this.upsert([target]);
+    return { id: target.id, count: under.length };
+  }
+
   /** 뒷면 카드 몰래 보기: 정체는 요청한 사람에게만, "봤다"는 사실은 모두에게 */
   peek(p: IPlayer, id: string): string | null {
     const o = this.objs.get(id);
     if (!o || o.kind !== "card") return "카드를 찾을 수 없어요";
     if (o.faceUp) return "이미 앞면이에요";
-    if (!this.canTouch(o, p.id)) return "다른 사람이 잡고 있어요";
+    if (!this.canTouch(o, p.id)) return this.touchError(o);
     this.io.to(`p:${p.id}`).emit("peek", { id: o.id, face: o.face, back: o.back, shape: o.shape === "L" ? "L" : undefined });
     this.notice(`👁 ${p.nickname}님이 카드를 몰래 봤어요`, "peek");
-    return null;
-  }
-
-  // ------------------------------------------------------------------
-  // 우노! / 바퀴벌레 포커 선언
-  // ------------------------------------------------------------------
-  callUno(p: IPlayer): string | null {
-    if (this.preset !== "uno") return "우노 게임에서만 외칠 수 있어요";
-    if (p.hand.length > 2) return "카드가 2장 이하일 때 외칠 수 있어요";
-    const now = Date.now();
-    if (p.unoAt && now - p.unoAt < 2000) return null; // 연타 방지
-    p.unoAt = now;
-    p.uno = true;
-    this.roomChanged();
-    this.notice(`🔔 ${p.nickname}: 우노!`, "uno");
-    return null;
-  }
-
-  sayClaim(p: IPlayer, to: string, creature: string): string | null {
-    const c = CREATURES.find((x) => x.id === creature);
-    const target = this.players.get(to);
-    if (!c) return "알 수 없는 벌레예요";
-    if (!target || target.id === p.id) return "받을 사람을 골라 주세요";
-    this.claim = { by: p.id, to: target.id, creature: c.id as CreatureId, answer: null, at: Date.now() };
-    this.roomChanged();
-    this.notice(`📣 ${p.nickname} → ${target.nickname}: "이건 ${c.icon} ${c.name}야!"`, "claim");
-    return null;
-  }
-
-  answerClaim(p: IPlayer, answer: unknown): string | null {
-    const cl = this.claim;
-    if (!cl) return "대답할 선언이 없어요";
-    if (cl.to !== p.id) return "선언을 받은 사람만 대답할 수 있어요";
-    if (answer !== "yes" && answer !== "no") return "잘못된 대답이에요";
-    if (cl.answer) return "이미 대답했어요";
-    cl.answer = answer;
-    this.roomChanged();
-    const c = CREATURES.find((x) => x.id === cl.creature)!;
-    this.notice(`${p.nickname}: ${answer === "yes" ? `"진짜 ${c.name} 맞아!" 🙆` : `"${c.name} 아니야, 거짓말!" 🙅`} — 카드를 뒤집어 확인하세요`, "claim");
     return null;
   }
 

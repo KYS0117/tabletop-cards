@@ -13,6 +13,7 @@
 //
 // ※ 게임방은 메모리에만 저장됩니다. 서버를 재시작하거나 다시 배포하면 모든 방이 사라집니다.
 // =====================================================================
+import { APP_VERSION } from "../../shared/version";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { createReadStream, existsSync, statSync } from "node:fs";
 import { extname, join, normalize, resolve, dirname } from "node:path";
@@ -47,6 +48,12 @@ const MIME: Record<string, string> = {
 
 function serveStatic(req: IncomingMessage, res: ServerResponse) {
   const url = new URL(req.url || "/", "http://x");
+  if (url.pathname === "/version") {
+    // 배포 확인용: 브라우저로 https://내주소/version 을 열면 지금 실행 중인 서버 버전
+    res.writeHead(200, { "content-type": "text/plain; charset=utf-8", "cache-control": "no-store" });
+    res.end(APP_VERSION);
+    return;
+  }
   if (url.pathname === "/healthz") {
     res.writeHead(200, { "content-type": "text/plain" });
     res.end("ok");
@@ -100,7 +107,7 @@ const manager = new RoomManager(io);
 io.on("connection", (socket) => manager.handle(socket));
 
 http.listen(PORT, () => {
-  console.log(`\n🃏 테이블탑 카드 서버 실행 중: http://localhost:${PORT}`);
+  console.log(`\n🃏 테이블탑 카드 서버 실행 중: http://localhost:${PORT}  (버전 ${APP_VERSION})`);
   console.log(`   서버 측정: ${metricsEnabled ? "켜짐 (/debug/metrics)" : "꺼짐 (ENABLE_METRICS=1 로 켜기)"}`);
   console.log(`   CORS 허용: ${CORS.length ? CORS.join(", ") : "모든 주소 (개발 모드)"}`);
   console.log(`   웹사이트 파일: ${existsSync(STATIC_DIR) ? STATIC_DIR : "없음 (개발 중에는 Vite 개발 서버 사용)"}`);

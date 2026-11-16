@@ -7,6 +7,8 @@
   toad.png, scorpion.png, spider.png, stinkbug.png) 종류마다 8장씩, 모두 64장이 됩니다.
   (deck.json 의 "fillTo": 64 설정)
 - 64장을 모두 찍어서 넣었다면 그대로 64장이 됩니다.
+  ※ 규칙 자동 판정을 위해 파일 이름이 꼭 벌레 이름으로 시작해야 해요: rat-1.png, rat-2.png, spider_07.jpg …
+    (cockroach 바퀴벌레, rat 쥐, bat 박쥐, fly 파리, toad 두꺼비, scorpion 전갈, spider 거미, stinkbug 노린재)
 - 특정 그림의 장수를 바꾸려면 deck.json 의 "counts" 에 { "rat.png": 7 } 처럼 적으세요.
 - 파일 이름은 영문·숫자·-_. 만 사용하세요 (한글·띄어쓰기 X). PNG / JPG / WebP, 한 장 최대 5MB.
 - 그림이 하나도 없으면 임시 글자 카드(🪳 바퀴벌레 등)로 게임이 준비됩니다.

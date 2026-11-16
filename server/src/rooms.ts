@@ -120,6 +120,7 @@ export class RoomManager {
         if (!nickname) return reply({ ok: false, error: "닉네임을 입력해 주세요" });
         player = room.addPlayer(nickname, tabId);
         if (!player) return reply({ ok: false, error: `방이 가득 찼어요 (최대 ${MAX_PLAYERS}명)` });
+        room.game?.onJoin?.(player); // 예: 프로포즈 게임 중이면 카드 받기 (우노·바퀴벌레는 다음 판부터)
       }
       data.code = room.code;
       data.pid = player.id;

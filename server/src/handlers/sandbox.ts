@@ -68,6 +68,10 @@ export function registerSandboxHandlers(r: Router) {
     if (!list) return "잘못된 요청이에요";
     return c.room.remove(c.player.id, list) ?? undefined;
   });
+  r.on("obj:shake", (c, p) => {
+    if (!isId(p.id)) return "잘못된 요청이에요";
+    return c.room.shakeGather(c.player.id, p.id, Number(p.x), Number(p.y));
+  });
   r.on("obj:pin", (c, p) => {
     const list = ids(p);
     if (!list || typeof p.pinned !== "boolean") return "잘못된 요청이에요";

@@ -3,7 +3,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { MAX_PLAYERS } from "../../shared/protocol";
 import { applyPreset } from "../src/presets";
-import { leaks, setup } from "./helpers";
+import { leaks, setup, startRules } from "./helpers";
 
 const stacks = (room: ReturnType<typeof setup>["room"]) => room.pubObjects().filter((o) => o.kind === "stack");
 
@@ -15,7 +15,7 @@ test("프로포즈 게임 준비: 가로형 덱 하나 + 기본 6장·덱 6장�
   const s = stacks(room);
   assert.equal(s.length, 1);
   const main = s[0];
-  assert.ok(main.kind === "stack" && !main.keep);
+  assert.ok(main.kind === "stack" && main.system, "게임이 관리하는 덱");
   assert.equal(main.shape, "L");
   for (const p of [A, B]) {
     assert.equal(p.hand.length, 12);
@@ -37,22 +37,25 @@ test(`${MAX_PLAYERS}명 꽉 찬 방에서도 프로포즈·우노 준비 (모두
   assert.equal(applyPreset(room, "propose", "A"), null);
   for (const p of all) assert.equal(p.hand.length, 12);
   assert.equal(applyPreset(room, "uno", "A"), null);
+  assert.equal(startRules(room), null);
   for (const p of all) assert.equal(p.hand.length, 7);
-  const deck = stacks(room).find((o) => o.kind === "stack" && !o.keep);
+  const deck = stacks(room).find((o) => o.kind === "stack" && o.label === "우노 덱");
   assert.equal(deck?.count, 108 - 70 - 1);
 });
 
 test("우노 방식 준비: 7장씩 + 버린 카드 자리에 첫 카드 공개", () => {
   const { room, A, B } = setup();
   assert.equal(applyPreset(room, "uno", "A"), null);
+  assert.equal(startRules(room), null);
   assert.equal(A.hand.length, 7);
   assert.equal(B.hand.length, 7);
-  const pile = stacks(room).find((o) => o.kind === "stack" && o.keep);
+  const pile = stacks(room).find((o) => o.kind === "stack" && o.label === "버린 카드");
   assert.ok(pile && pile.kind === "stack");
   assert.equal(pile.count, 1);
   assert.equal(pile.faceUp, true);
-  assert.match(pile.top ?? "", /^U:/);
-  const deck = stacks(room).find((o) => o.kind === "stack" && !o.keep);
+  assert.equal(pile.system, true, "게임이 관리하는 더미");
+  assert.match(pile.top ?? "", /^U:[RYGB]-\d$/, "첫 카드는 숫자 카드");
+  const deck = stacks(room).find((o) => o.kind === "stack" && o.label === "우노 덱");
   assert.equal(deck?.count, 108 - 14 - 1);
   assert.equal(room.score, null);
 });
@@ -70,18 +73,19 @@ test("게임 준비 시 이전 손패와 점수는 비워짐, 알 수 없는 게
 
 test("버림 더미(keep): 비어도 사라지지 않고, 카드를 놓으면 앞면으로 쌓임", () => {
   const { room, A } = setup();
-  applyPreset(room, "uno", "A");
-  const pile = stacks(room).find((o) => o.kind === "stack" && o.keep)!;
+  const deck = stacks(room)[0];
+  const pile = room.addStack([], { x: 600, y: 600, faceUp: true, keep: true, label: "버린 카드" });
+  room.drawToHand(A, deck.id, 1);
   const h = A.hand[0];
   const card = room.handPlay(A, h.id, pile.x + 5, pile.y + 5, true, true);
   assert.ok(typeof card !== "string");
   room.release(A.id, [{ id: card.id, x: pile.x + 5, y: pile.y + 5 }], pile.id);
   const after = stacks(room).find((o) => o.id === pile.id);
   assert.ok(after && after.kind === "stack");
-  assert.equal(after.count, 2);
+  assert.equal(after.count, 1);
   assert.equal(after.top, h.face);
   // 전부 가져가도 자리는 남음
-  room.drawToHand(A, pile.id, 2);
+  room.drawToHand(A, pile.id, 1);
   const empty = stacks(room).find((o) => o.id === pile.id);
   assert.ok(empty && empty.kind === "stack" && empty.count === 0);
 });
@@ -89,7 +93,7 @@ test("버림 더미(keep): 비어도 사라지지 않고, 카드를 놓으면 �
 test("커스텀 카드: 덱과 같은 뒷면·모양으로 섞이고, 다른 사람에게 내용이 전송되지 않음", () => {
   const { room, A, io } = setup();
   applyPreset(room, "propose", "A");
-  const main = stacks(room).find((o) => o.kind === "stack" && !o.keep)!;
+  const main = stacks(room).find((o) => o.kind === "stack")!;
   io.clear();
   const r = room.customCreate(A, ["바다가 보이는 옥상에서", "  ", "비밀 문장 ABC"], "deck");
   assert.deepEqual(r, { count: 2 });
@@ -100,8 +104,11 @@ test("커스텀 카드: 덱과 같은 뒷면·모양으로 섞이고, 다른 사
   assert.doesNotMatch(JSON.stringify(io.sentTo("TEST01")), /비밀 문장/);
 });
 
-test("커스텀 카드: 내 손패로, 글자 수·줄 수 제한, 빈 입력 거부", () => {
+test("커스텀 카드: 프로포즈 게임에서만, 내 손패로, 글자 수·줄 수 제한, 빈 입력 거부", () => {
   const { room, A } = setup();
+  assert.equal(typeof room.customCreate(A, ["안 됨"], "hand"), "string", "자유 테이블에서는 거부");
+  applyPreset(room, "propose", "A");
+  A.hand = [];
   const r = room.customCreate(A, ["가".repeat(50), ...Array.from({ length: 30 }, (_, i) => `줄${i}`)], "hand");
   assert.ok(typeof r !== "string");
   assert.equal(r.count, 20);
@@ -110,14 +117,16 @@ test("커스텀 카드: 내 손패로, 글자 수·줄 수 제한, 빈 입력 �
   assert.equal(typeof room.customCreate(A, "문자열", "deck"), "string");
 });
 
-test("반지: 누구나 주고 빼기, 3개면 승리 알림, 점수판 없는 게임에서는 거부", () => {
+test("반지 고치기(score:add)는 방장만, 0 아래로 안 내려감", () => {
   const { room, A, B, io } = setup();
-  assert.equal(typeof room.scoreAdd(A, B.id, 1), "string");
+  assert.equal(typeof room.scoreAdd(A, B.id, 1), "string", "점수판 없는 게임");
   applyPreset(room, "propose", "A");
+  room.hostId = A.id;
+  assert.equal(typeof room.scoreAdd(B, B.id, 1), "string", "방장이 아니면 거부");
   io.clear();
   room.scoreAdd(A, B.id, 1);
   room.scoreAdd(A, B.id, 1);
-  room.scoreAdd(B, B.id, 1);
+  room.scoreAdd(A, B.id, 1);
   assert.equal(B.score, 3);
   assert.ok(io.sent.some((s) => s.ev === "notice" && s.data.kind === "win"));
   room.scoreAdd(A, B.id, -1);
@@ -219,37 +228,37 @@ test("👁 몰래 보기: 정체는 본인 채널로만, 모두에게는 '봤다
   assert.ok(io.sentTo(room.code).some((m) => m.ev === "notice" && m.data.kind === "peek"));
 });
 
-test("🔔 우노!: 우노 게임 + 손패 2장 이하만, 다시 3장 이상이 되면 풀림", () => {
-  const { room, A } = setup();
-  assert.equal(typeof room.callUno(A), "string", "우노 게임이 아니면 거부");
-  applyPreset(room, "uno", "A");
-  assert.equal(typeof room.callUno(A), "string", "7장이면 거부");
-  A.hand = A.hand.slice(0, 1);
-  assert.equal(room.callUno(A), null);
-  assert.equal(room.pubPlayers().find((p) => p.id === A.id)!.uno, true);
-  const deck = stacks(room).find((o) => o.kind === "stack" && !o.keep)!;
-  room.drawToHand(A, deck.id, 2);
-  assert.ok(!room.pubPlayers().find((p) => p.id === A.id)!.uno);
-});
-
-test("🪳 바퀴벌레 포커: 8종×8장=64장 전부 나눠줌, 선언·대답", () => {
-  const { room, A, B } = setup();
-  assert.equal(applyPreset(room, "cockroach", "A"), null);
-  assert.equal(A.hand.length + B.hand.length, 64);
-  assert.equal(A.hand.length, 32);
-  assert.equal(room.pubObjects().length, 0, "테이블은 비어 있음");
-  const kinds = new Map<string, number>();
-  for (const h of [...A.hand, ...B.hand]) kinds.set(h.face, (kinds.get(h.face) ?? 0) + 1);
-  assert.equal(kinds.size, 8);
-  assert.ok([...kinds.values()].every((n) => n === 8));
-  assert.equal(typeof room.sayClaim(A, A.id, "rat"), "string", "자기 자신에게는 불가");
-  assert.equal(typeof room.sayClaim(A, B.id, "dragon"), "string", "없는 벌레 불가");
-  assert.equal(room.sayClaim(A, B.id, "rat"), null);
-  assert.deepEqual({ ...room.pubRoom().claim, at: 0 }, { by: A.id, to: B.id, creature: "rat", answer: null, at: 0 });
-  assert.equal(typeof room.answerClaim(A, "yes"), "string", "받은 사람만 대답");
-  assert.equal(room.answerClaim(B, "no"), null);
-  assert.equal(room.pubRoom().claim?.answer, "no");
-  assert.equal(typeof room.answerClaim(B, "yes"), "string", "두 번 대답 불가");
-  applyPreset(room, "free", "A");
-  assert.equal(room.pubRoom().claim, null, "게임을 바꾸면 선언 초기화");
+test("🫨 잡고 흔들기: 들고 있는 카드 주변 카드만 모여 한 더미가 되고, 계속 들고 있음", () => {
+  const { room, io, A, B } = setup();
+  const deck = stacks(room)[0];
+  room.drawToHand(A, deck.id, 6);
+  const play = (i: number, x: number, y: number) => {
+    const c = room.handPlay(A, A.hand[0].id, x, y, true, false);
+    assert.ok(typeof c !== "string");
+    return c.id;
+  };
+  void play;
+  const held = play(0, 500, 500);
+  const near1 = play(1, 560, 520);
+  const near2 = play(2, 420, 640);
+  const far = play(3, 1500, 1500);
+  const pinned = play(4, 520, 450);
+  room.setPinned(A.id, [pinned], true);
+  assert.deepEqual(room.shakeGather(A.id, held, 500, 500) as string, "들고 있는 카드를 흔들어야 모을 수 있어요", "안 들고 있으면 거부");
+  assert.deepEqual(room.grab(A.id, [held]), [held]);
+  assert.equal(typeof room.shakeGather(B.id, held, 500, 500), "string", "남이 든 카드는 흔들 수 없음");
+  io.clear();
+  const r = room.shakeGather(A.id, held, 500, 500);
+  assert.ok(typeof r !== "string");
+  assert.equal(r.count, 2, "주변 2장을 모음 (들고 있던 1장과 합쳐 3장)");
+  const objs = room.pubObjects();
+  const st = objs.find((o) => o.id === r.id);
+  assert.ok(st && st.kind === "stack" && st.count === 3 && st.lockedBy === A.id, "새 더미는 계속 A가 들고 있음");
+  assert.ok(objs.some((o) => o.id === far), "멀리 있는 카드는 그대로");
+  assert.ok(objs.some((o) => o.id === pinned), "잠긴 카드는 그대로");
+  assert.ok(!objs.some((o) => o.id === near1 || o.id === near2 || o.id === held));
+  assert.ok(io.sentTo(room.code).some((m) => m.ev === "fx:gather"), "모두에게 모이는 연출");
+  // 다시 흔들어도 더 모을 게 없으면 그대로
+  const again = room.shakeGather(A.id, r.id, 500, 500);
+  assert.ok(typeof again !== "string" && again.count === 0 && again.id === r.id);
 });
